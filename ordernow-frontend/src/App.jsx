@@ -20,10 +20,12 @@ import {
   MapPin,
   Phone,
   Truck,
-  Store
+  Store,
+  LogOut
 } from 'lucide-react';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/+$/, '');
+const ADMIN_REQUEST_HEADERS = { 'X-OrderNow-Request': '1' };
 
 const CATEGORIES = [
   'All',
@@ -34,14 +36,6 @@ const CATEGORIES = [
   'Beverages & Drinks'
 ];
 
-const ORDER_STATUS_OPTIONS = [
-  'Awaiting Payment',
-  'Pending Kitchen',
-  'Preparing',
-  'Ready',
-  'Completed',
-  'Cancelled'
-];
 
 const TABLE_NUMBERS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
@@ -234,15 +228,15 @@ function normalizeOrder(rawOrder, menusList = []) {
     _id: rawOrder._id || rawOrder.tx_ref || `ord-${Date.now()}`,
     tx_ref: rawOrder.tx_ref || `TX-${String(rawOrder._id || Date.now()).slice(-6).toUpperCase()}`,
     CustomerName: rawOrder.CustomerName || 'Restaurant Guest',
-    CustomerPhone: rawOrder.CustomerPhone || '+251 973 476 418',
+    CustomerPhone: rawOrder.CustomerPhone || '',
     ServiceType: serviceType,
     TableNumber: tableNumber,
     DeliveryAddress: deliveryAddress,
     Message: rawOrder.Message || '',
     items: normalizedItems,
     TotalAmount: computedTotal,
-    PaymentStatus: rawOrder.PaymentStatus || 'Paid',
-    OrderStatus: rawOrder.OrderStatus || 'Pending Kitchen',
+    PaymentStatus: rawOrder.PaymentStatus || 'Pending',
+    OrderStatus: rawOrder.OrderStatus || 'Awaiting Payment',
     statusUpdatedAt: Number(rawOrder.statusUpdatedAt || 0),
     orderedAt: rawOrder.orderedAt || new Date().toISOString()
   };
@@ -283,7 +277,7 @@ function mergeOrdersList(primaryOrders = [], secondaryOrders = [], menusList = [
             ? norm.CustomerName
             : existing.CustomerName,
         CustomerPhone:
-          norm.CustomerPhone && norm.CustomerPhone !== '+251 973 476 418'
+          norm.CustomerPhone
             ? norm.CustomerPhone
             : existing.CustomerPhone,
         items:
@@ -313,14 +307,10 @@ export default function App() {
     }
   });
 
-  // STRICT PRIVACY: Stores ONLY this device's order tx_refs
+  // Receipt references are only accepted when they were previously saved by this browser's checkout flow.
   const [myReceiptRefs, setMyReceiptRefs] = useState(() => {
     try {
       const savedRefs = JSON.parse(localStorage.getItem('orderNow_myReceiptRefs') || '[]');
-      const savedActive = JSON.parse(localStorage.getItem('orderNow_activeOrder') || 'null');
-      if (savedActive?.tx_ref && !savedRefs.includes(savedActive.tx_ref)) {
-        return [savedActive.tx_ref, ...savedRefs];
-      }
       return Array.isArray(savedRefs) ? savedRefs : [];
     } catch (_) {
       return [];
@@ -329,9 +319,17 @@ export default function App() {
 
   const [orders, setOrders] = useState(() => {
     try {
+      const savedRefs = JSON.parse(localStorage.getItem('orderNow_myReceiptRefs') || '[]');
       const savedOrders = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
       const savedActive = JSON.parse(localStorage.getItem('orderNow_activeOrder') || 'null');
-      const combined = savedActive ? [savedActive, ...savedOrders] : savedOrders;
+      const receiptRefs = Array.isArray(savedRefs) ? savedRefs : [];
+      const ownOrders = Array.isArray(savedOrders)
+        ? savedOrders.filter((order) => receiptRefs.includes(order?.tx_ref) || receiptRefs.includes(String(order?._id)))
+        : [];
+      const activeIsOwnReceipt = savedActive && (
+        receiptRefs.includes(savedActive.tx_ref) || receiptRefs.includes(String(savedActive._id))
+      );
+      const combined = activeIsOwnReceipt ? [savedActive, ...ownOrders] : ownOrders;
       return mergeOrdersList(combined, [], mergeMenusWithBeverages(INITIAL_FOOD_MENUS));
     } catch (_) {
       return [];
@@ -340,8 +338,11 @@ export default function App() {
 
   const [selectedReceiptRef, setSelectedReceiptRef] = useState(() => {
     try {
+      const refs = JSON.parse(localStorage.getItem('orderNow_myReceiptRefs') || '[]');
       const saved = JSON.parse(localStorage.getItem('orderNow_activeOrder') || 'null');
-      return saved?.tx_ref || null;
+      return Array.isArray(refs) && saved && (refs.includes(saved.tx_ref) || refs.includes(String(saved._id)))
+        ? saved.tx_ref || null
+        : null;
     } catch (_) {
       return null;
     }
@@ -362,14 +363,14 @@ export default function App() {
   const [checkoutError, setCheckoutError] = useState('');
 
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [pendingChapaOrder, setPendingChapaOrder] = useState(null);
 
-  const [isStaff, setIsStaff] = useState(() => {
-    return sessionStorage.getItem('orderNow_isStaff') === 'true';
-  });
+  // Staff access is restored only after the backend validates its HttpOnly session cookie.
+  const [isStaff, setIsStaff] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [passcode, setPasscode] = useState('');
   const [authError, setAuthError] = useState('');
+  const [paymentMessage, setPaymentMessage] = useState('');
+  const [isAuthBusy, setIsAuthBusy] = useState(false);
 
   const [staffTab, setStaffTab] = useState('queue');
   const [isSyncing, setIsSyncing] = useState(false);
@@ -388,15 +389,30 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('orderNow_orders', JSON.stringify(orders));
-    } catch (_) {}
-  }, [orders]);
-
-  useEffect(() => {
-    try {
       localStorage.setItem('orderNow_myReceiptRefs', JSON.stringify(myReceiptRefs));
     } catch (_) {}
   }, [myReceiptRefs]);
+
+  useEffect(() => {
+    // Remove old staff-wide order caches left by previous app versions, even if the API is offline.
+    try {
+      const refsValue = JSON.parse(localStorage.getItem('orderNow_myReceiptRefs') || '[]');
+      const refs = Array.isArray(refsValue) ? refsValue : [];
+      const ordersValue = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
+      const ownOrders = Array.isArray(ordersValue)
+        ? ordersValue.filter((order) => refs.includes(order?.tx_ref) || refs.includes(String(order?._id)))
+        : [];
+      const active = JSON.parse(localStorage.getItem('orderNow_activeOrder') || 'null');
+      const activeIsOwnReceipt = active && (refs.includes(active.tx_ref) || refs.includes(String(active._id)));
+      localStorage.setItem('orderNow_myReceiptRefs', JSON.stringify(refs));
+      localStorage.setItem('orderNow_orders', JSON.stringify(ownOrders));
+      if (!activeIsOwnReceipt) localStorage.removeItem('orderNow_activeOrder');
+    } catch (_) {
+      localStorage.removeItem('orderNow_orders');
+      localStorage.removeItem('orderNow_activeOrder');
+      localStorage.setItem('orderNow_myReceiptRefs', '[]');
+    }
+  }, []);
 
   useEffect(() => {
     try {
@@ -404,66 +420,44 @@ export default function App() {
     } catch (_) {}
   }, [menus]);
 
-  const persistAndBroadcastOrders = (updatedOrdersList) => {
+  const saveOwnCustomerOrder = (order) => {
     try {
-      localStorage.setItem('orderNow_orders', JSON.stringify(updatedOrdersList));
-      if (typeof BroadcastChannel !== 'undefined') {
-        const bc = new BroadcastChannel('ordernow_live_sync');
-        bc.postMessage({ type: 'ORDERS_UPDATED', orders: updatedOrdersList });
-        bc.close();
-      }
-    } catch (_) {}
-  };
-
-  // Live Cross-Tab Sync
-  useEffect(() => {
-    const handleStorageEvent = (e) => {
-      if (e.key === 'orderNow_orders' && e.newValue) {
-        try {
-          const freshFromOtherTab = JSON.parse(e.newValue);
-          setOrders((prev) => mergeOrdersList(freshFromOtherTab, prev, menus));
-        } catch (_) {}
-      }
-      if (e.key === 'orderNow_myReceiptRefs' && e.newValue) {
-        try {
-          setMyReceiptRefs(JSON.parse(e.newValue));
-        } catch (_) {}
-      }
-    };
-
-    window.addEventListener('storage', handleStorageEvent);
-
-    let bc;
-    if (typeof BroadcastChannel !== 'undefined') {
-      bc = new BroadcastChannel('ordernow_live_sync');
-      bc.onmessage = (event) => {
-        if (event.data?.type === 'ORDERS_UPDATED' && Array.isArray(event.data.orders)) {
-          setOrders((prev) => mergeOrdersList(event.data.orders, prev, menus));
-        }
-      };
+      const storedRefs = JSON.parse(localStorage.getItem('orderNow_myReceiptRefs') || '[]');
+      const nextRefs = Array.from(new Set([order.tx_ref, String(order._id), ...storedRefs].filter(Boolean)));
+      const storedOrders = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
+      const ownStoredOrders = Array.isArray(storedOrders)
+        ? storedOrders.filter((item) => nextRefs.includes(item?.tx_ref) || nextRefs.includes(String(item?._id)))
+        : [];
+      const ownOrders = mergeOrdersList([order], ownStoredOrders, menus);
+      localStorage.setItem('orderNow_myReceiptRefs', JSON.stringify(nextRefs));
+      localStorage.setItem('orderNow_orders', JSON.stringify(ownOrders));
+      localStorage.setItem('orderNow_activeOrder', JSON.stringify(order));
+      setMyReceiptRefs(nextRefs);
+      setOrders((previous) => mergeOrdersList([order], previous, menus));
+      setSelectedReceiptRef(order.tx_ref);
+    } catch (_) {
+      console.warn('Could not save the local customer receipt.');
     }
-
-    return () => {
-      window.removeEventListener('storage', handleStorageEvent);
-      if (bc) bc.close();
-    };
-  }, [menus]);
+  };
 
   const fetchBackendData = async (showSpinner = false) => {
     if (showSpinner) setIsSyncing(true);
     try {
-      const localStoredOrders = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
+      const menuRequest = fetch(`${API_BASE_URL}/api/menu`);
+      const orderRequest = isStaff
+        ? fetch(`${API_BASE_URL}/api/orders`, {
+            credentials: 'include',
+            headers: ADMIN_REQUEST_HEADERS
+          })
+        : Promise.resolve(null);
 
-      const [menuRes, orderRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/api/menu`).catch(() => null),
-        fetch(`${API_BASE_URL}/api/orders`).catch(() => null)
-      ]);
-
+      const [menuRes, orderRes] = await Promise.all([menuRequest, orderRequest]);
       let latestMenus = menus;
-      if (menuRes && menuRes.ok) {
-        const m = await menuRes.json();
-        if (Array.isArray(m.data) && m.data.length > 0) {
-          const formattedDbMenus = m.data.map((dish, idx) => ({
+
+      if (menuRes.ok) {
+        const menuResponse = await menuRes.json();
+        if (Array.isArray(menuResponse.data) && menuResponse.data.length > 0) {
+          const formattedDbMenus = menuResponse.data.map((dish, idx) => ({
             ...dish,
             Category: dish.Category || 'Tibs & Sizzlers',
             ImageUrl:
@@ -479,18 +473,28 @@ export default function App() {
       }
 
       let dbOrders = [];
-      if (orderRes && orderRes.ok) {
-        const o = await orderRes.json();
-        if (Array.isArray(o.data)) {
-          dbOrders = o.data;
+      if (isStaff && orderRes) {
+        if (orderRes.status === 401 || orderRes.status === 403) {
+          setIsStaff(false);
+          setActiveView('storefront');
+          const ownOrders = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
+          setOrders(Array.isArray(ownOrders) ? ownOrders : []);
+        } else if (orderRes.ok) {
+          const orderResponse = await orderRes.json();
+          if (Array.isArray(orderResponse.data)) dbOrders = orderResponse.data;
         }
       }
 
-      setOrders((prevInMemory) => {
-        const latestLocal = mergeOrdersList(localStoredOrders, prevInMemory, latestMenus);
-        const finalMerged = mergeOrdersList(latestLocal, dbOrders, latestMenus);
-        return finalMerged;
-      });
+      // Local storage is reserved for receipts created on this browser. Staff order data stays in memory.
+      const savedRefs = JSON.parse(localStorage.getItem('orderNow_myReceiptRefs') || '[]');
+      const stored = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
+      const localStoredOrders = Array.isArray(stored)
+        ? stored.filter((order) => savedRefs.includes(order?.tx_ref) || savedRefs.includes(String(order?._id)))
+        : [];
+      // Remove any all-orders cache written by older versions from this browser.
+      localStorage.setItem('orderNow_orders', JSON.stringify(localStoredOrders));
+      const merged = mergeOrdersList(localStoredOrders, dbOrders, latestMenus);
+      setOrders(merged);
 
       const nowStr = new Date().toLocaleTimeString([], {
         hour: '2-digit',
@@ -498,56 +502,100 @@ export default function App() {
         second: '2-digit'
       });
       setLastSyncedAt(nowStr);
-    } catch (e) {
-      console.warn('Sync completed using local queue.');
+    } catch (_) {
+      console.warn('Could not synchronize with the OrderNow API.');
     } finally {
-      if (showSpinner) {
-        setTimeout(() => setIsSyncing(false), 300);
-      }
+      if (showSpinner) setIsSyncing(false);
     }
   };
 
   useEffect(() => {
-    fetchBackendData(false);
+    let active = true;
+    fetch(`${API_BASE_URL}/api/admin/session`, {
+      credentials: 'include',
+      headers: ADMIN_REQUEST_HEADERS
+    })
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return response.json();
+      })
+      .then((data) => {
+        if (active && data?.authenticated) setIsStaff(true);
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      fetchBackendData(false);
-    }, 3000);
+    fetchBackendData(false);
+    const interval = setInterval(() => fetchBackendData(false), 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isStaff]);
 
   const handleStaffLogin = async (e) => {
     e.preventDefault();
     setAuthError('');
+    setIsAuthBusy(true);
+
     try {
-      const res = await fetch(`${API_BASE_URL}/api/admin/login`, {
+      const response = await fetch(`${API_BASE_URL}/api/admin/login`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...ADMIN_REQUEST_HEADERS
+        },
         body: JSON.stringify({ passcode })
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setIsStaff(true);
-          sessionStorage.setItem('orderNow_isStaff', 'true');
-          setIsAuthModalOpen(false);
-          setPasscode('');
-          setActiveView('staff');
-          return;
-        }
-      }
-    } catch (_) {}
+      const data = await response.json().catch(() => ({}));
 
-    if (passcode === '1234') {
+      if (!response.ok || !data.success || !data.authenticated) {
+        setAuthError(data.message || 'Staff authentication failed.');
+        return;
+      }
+
       setIsStaff(true);
-      sessionStorage.setItem('orderNow_isStaff', 'true');
       setIsAuthModalOpen(false);
       setPasscode('');
       setActiveView('staff');
-    } else {
-      setAuthError('Invalid staff passcode. (Default PIN: 1234)');
+    } catch (_) {
+      setAuthError('Unable to connect to the staff authentication service.');
+    } finally {
+      setIsAuthBusy(false);
+    }
+  };
+
+  const handleStaffLogout = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/admin/logout`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: ADMIN_REQUEST_HEADERS
+      });
+      if (!response.ok && response.status !== 401) {
+        const data = await response.json().catch(() => ({}));
+        setStatusMsg(data.message || 'The server could not end the staff session. Please try again.');
+        return;
+      }
+    } catch (_) {
+      setStatusMsg('Unable to reach the server. Your staff session may still be active; please retry logout.');
+      return;
+    }
+
+    setIsStaff(false);
+    setActiveView('storefront');
+    setStaffTab('queue');
+    try {
+      const savedRefs = JSON.parse(localStorage.getItem('orderNow_myReceiptRefs') || '[]');
+      const saved = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
+      setOrders(Array.isArray(saved)
+        ? saved.filter((order) => savedRefs.includes(order?.tx_ref) || savedRefs.includes(String(order?._id)))
+        : []);
+    } catch (_) {
+      setOrders([]);
     }
   };
 
@@ -580,252 +628,215 @@ export default function App() {
   const handleCheckoutSubmit = async (e) => {
     e.preventDefault();
     setCheckoutError('');
+    setPaymentMessage('');
 
     if (!customerName.trim()) {
       setCheckoutError('Please enter your name.');
       return;
     }
-
     if (serviceType === 'Dine-In' && !tableNumber) {
-      setCheckoutError('Please select your Table Number.');
+      setCheckoutError('Please select your table number.');
       return;
     }
-
     if ((serviceType === 'Takeaway' || serviceType === 'Delivery') && !customerPhone.trim()) {
       setCheckoutError(`Please provide your phone number for ${serviceType}.`);
       return;
     }
-
     if (serviceType === 'Delivery' && !deliveryAddress.trim()) {
       setCheckoutError('Please enter your delivery address.');
       return;
     }
+    if (!cart.length) {
+      setCheckoutError('Your cart is empty.');
+      return;
+    }
 
     setIsSubmitting(true);
-
-    const itemsPayload = cart.map((item) => ({
-      menuId: item._id,
-      DishName: item.DishName,
-      UnitPrice: Number(item.Price),
-      Quantity: Number(item.Quantity),
-      Subtotal: Number(item.Price) * Number(item.Quantity),
-      ImageUrl: item.ImageUrl,
-      Category: item.Category
-    }));
-
-    const generatedTxRef = `ORD-${Date.now().toString().slice(-6)}`;
-    const formattedDeliveryLocation =
-      serviceType === 'Dine-In'
-        ? `Dine-In • Table ${tableNumber}`
-        : serviceType === 'Takeaway'
-        ? 'Takeaway / Counter Pickup'
-        : deliveryAddress.trim();
-
-    const validMongoItem =
-      itemsPayload.find((i) => /^[0-9a-fA-F]{24}$/.test(String(i.menuId))) ||
-      itemsPayload[0];
-
     const payload = {
       CustomerName: customerName.trim(),
-      CustomerPhone: customerPhone.trim() || '+251 973 476 418',
+      CustomerPhone: customerPhone.trim(),
       ServiceType: serviceType,
       TableNumber: serviceType === 'Dine-In' ? String(tableNumber) : '',
-      DeliveryAddress: formattedDeliveryLocation,
+      DeliveryAddress: serviceType === 'Delivery' ? deliveryAddress.trim() : '',
       Message: orderMessage.trim(),
-      items: itemsPayload,
-      menuId: validMongoItem?.menuId,
-      Quantity: itemsPayload.reduce((sum, i) => sum + i.Quantity, 0),
-      TotalAmount: cartTotal,
-      tx_ref: generatedTxRef,
-      statusUpdatedAt: Date.now()
+      // Only identifiers and quantities are sent. The backend owns prices and totals.
+      items: cart.map((item) => ({
+        menuId: String(item._id),
+        Quantity: Number(item.Quantity)
+      }))
     };
 
     try {
-      const res = await fetch(`${API_BASE_URL}/api/orders`, {
+      const response = await fetch(`${API_BASE_URL}/api/orders`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...ADMIN_REQUEST_HEADERS
+        },
         body: JSON.stringify(payload)
       });
-      if (res.ok) {
-        const data = await res.json();
-        const serverOrder = normalizeOrder(
-          {
-            ...payload,
-            ...(data.data || {}),
-            tx_ref: data.tx_ref || data.data?.tx_ref || generatedTxRef,
-            items: data.data?.items?.length ? data.data.items : itemsPayload,
-            ServiceType: serviceType,
-            TableNumber: serviceType === 'Dine-In' ? String(tableNumber) : '',
-            DeliveryAddress: formattedDeliveryLocation,
-            CustomerName: payload.CustomerName,
-            CustomerPhone: payload.CustomerPhone,
-            Message: payload.Message,
-            TotalAmount: cartTotal,
-            statusUpdatedAt: Date.now()
-          },
-          menus
-        );
-        setPendingChapaOrder(serverOrder);
-        setIsCartOpen(false);
-        setIsSubmitting(false);
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok || !data.success || !data.checkout_url || !data.tx_ref || !data.data) {
+        setCheckoutError(data.message || 'Unable to start secure checkout. Please try again.');
         return;
       }
-    } catch (_) {}
 
-    const fallbackOrder = normalizeOrder(
-      {
-        _id: `ord-${Date.now()}`,
-        ...payload,
-        PaymentStatus: 'Pending',
-        OrderStatus: 'Awaiting Payment',
-        orderedAt: new Date().toISOString(),
-        statusUpdatedAt: Date.now()
-      },
-      menus
-    );
+      const serverOrder = normalizeOrder(
+        {
+          ...data.data,
+          tx_ref: data.tx_ref,
+          PaymentStatus: 'Pending',
+          OrderStatus: 'Awaiting Payment'
+        },
+        menus
+      );
 
-    setPendingChapaOrder(fallbackOrder);
-    setIsCartOpen(false);
-    setIsSubmitting(false);
+      saveOwnCustomerOrder(serverOrder);
+      setIsCartOpen(false);
+      setCheckoutError('');
+
+      // Navigate to Chapa's hosted payment page. Do not simulate a successful payment locally.
+      window.location.assign(data.checkout_url);
+    } catch (_) {
+      setCheckoutError('Unable to connect to the payment service. Your order was not confirmed. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const verifyPayment = async (tx_ref) => {
-    const nowTs = Date.now();
-    let finalPaidOrder = normalizeOrder(
-      {
-        ...pendingChapaOrder,
-        PaymentStatus: 'Paid',
-        OrderStatus: 'Pending Kitchen',
-        statusUpdatedAt: nowTs,
-        orderedAt: new Date().toISOString()
-      },
-      menus
-    );
+    if (!/^ORDN-[A-F0-9]{32}$/.test(String(tx_ref || ''))) {
+      setPaymentMessage('The payment reference is invalid. No payment has been confirmed.');
+      setActiveView('tracker');
+      return;
+    }
 
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/orders/verify/${tx_ref}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.data) {
-          finalPaidOrder = normalizeOrder(
-            {
-              ...finalPaidOrder,
-              ...data.data,
-              ServiceType: finalPaidOrder.ServiceType,
-              TableNumber: finalPaidOrder.TableNumber,
-              DeliveryAddress: finalPaidOrder.DeliveryAddress,
-              items: data.data.items?.length ? data.data.items : finalPaidOrder.items,
-              PaymentStatus: 'Paid',
-              OrderStatus:
-                data.data.OrderStatus === 'Awaiting Payment'
-                  ? 'Pending Kitchen'
-                  : data.data.OrderStatus || 'Pending Kitchen',
-              statusUpdatedAt: nowTs
-            },
-            menus
-          );
-        }
-      }
-    } catch (_) {}
-
-    setMyReceiptRefs((prevRefs) => {
-      const nextRefs = [
-        finalPaidOrder.tx_ref,
-        String(finalPaidOrder._id),
-        ...prevRefs
-      ];
-      return Array.from(new Set(nextRefs.filter(Boolean)));
-    });
-
-    setOrders((prev) => {
-      const merged = mergeOrdersList([finalPaidOrder], prev, menus);
-      persistAndBroadcastOrders(merged);
-      return merged;
-    });
-
-    localStorage.setItem('orderNow_activeOrder', JSON.stringify(finalPaidOrder));
-    setSelectedReceiptRef(finalPaidOrder.tx_ref);
-    setPendingChapaOrder(null);
-    setCart([]);
-    setOrderMessage('');
+    setIsSubmitting(true);
+    setPaymentMessage('Checking your payment securely with Chapa...');
     setActiveView('tracker');
+
+    let localOrder = null;
+    try {
+      const storedActive = JSON.parse(localStorage.getItem('orderNow_activeOrder') || 'null');
+      const storedOrders = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
+      localOrder = orders.find((order) => order.tx_ref === tx_ref) ||
+        (Array.isArray(storedOrders) ? storedOrders.find((order) => order.tx_ref === tx_ref) : null) ||
+        (storedActive?.tx_ref === tx_ref ? storedActive : null);
+
+      const response = await fetch(`${API_BASE_URL}/api/orders/verify/${encodeURIComponent(tx_ref)}`);
+      const data = await response.json().catch(() => ({}));
+
+      if (response.ok && data.verified === true && data.data?.PaymentStatus === 'Paid') {
+        const paidOrder = normalizeOrder(
+          {
+            ...(localOrder || {}),
+            ...(data.data || {}),
+            tx_ref,
+            PaymentStatus: 'Paid',
+            OrderStatus: data.data.OrderStatus || 'Pending Kitchen',
+            TotalAmount: data.data.TotalAmount ?? localOrder?.TotalAmount
+          },
+          menus
+        );
+        saveOwnCustomerOrder(paidOrder);
+        setPaymentMessage('Payment verified successfully. Your order has been sent to the kitchen.');
+        setCart([]);
+        setOrderMessage('');
+      } else {
+        const currentStatus = data.data?.PaymentStatus || localOrder?.PaymentStatus || 'Pending';
+        const pendingOrder = localOrder
+          ? normalizeOrder({ ...localOrder, PaymentStatus: currentStatus, OrderStatus: data.data?.OrderStatus || localOrder.OrderStatus || 'Awaiting Payment' }, menus)
+          : null;
+        if (pendingOrder) saveOwnCustomerOrder(pendingOrder);
+        setPaymentMessage(data.message || 'Payment has not been verified yet. Your order remains unconfirmed. You can retry checking its status.');
+      }
+    } catch (_) {
+      setPaymentMessage('We could not reach the payment verification service. Your order has not been marked as paid. Please retry.');
+    } finally {
+      setIsSubmitting(false);
+      // Remove the transaction reference from the visible address bar after verification.
+      if (window.location.search.includes('tx_ref=')) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    }
   };
 
+  useEffect(() => {
+    const txRef = new URLSearchParams(window.location.search).get('tx_ref');
+    if (txRef) verifyPayment(txRef);
+  }, []);
+
   const handleUpdateOrderStatus = async (orderId, txRef, newStatus) => {
-    const updateTimestamp = Date.now();
-
-    setOrders((prev) => {
-      const updated = prev.map((o) => {
-        const isMatch =
-          (orderId && String(o._id) === String(orderId)) ||
-          (txRef && o.tx_ref === txRef);
-        return isMatch
-          ? { ...o, OrderStatus: newStatus, statusUpdatedAt: updateTimestamp }
-          : o;
-      });
-      persistAndBroadcastOrders(updated);
-      return updated;
-    });
-
     try {
-      await fetch(`${API_BASE_URL}/api/orders/${orderId}/status`, {
+      const response = await fetch(`${API_BASE_URL}/api/orders/${orderId}/status`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...ADMIN_REQUEST_HEADERS
+        },
         body: JSON.stringify({ OrderStatus: newStatus })
       });
-    } catch (_) {}
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setStatusMsg(data.message || 'The order status could not be updated.');
+        return;
+      }
+
+      setOrders((previous) => previous.map((order) =>
+        String(order._id) === String(orderId) || (txRef && order.tx_ref === txRef)
+          ? { ...order, OrderStatus: data.data?.OrderStatus || newStatus }
+          : order
+      ));
+      setStatusMsg('Order status updated successfully.');
+    } catch (_) {
+      setStatusMsg('Unable to connect to the order service.');
+    }
   };
 
   const handleCreateMenu = async (e) => {
     e.preventDefault();
-    let createdDish = null;
+    setStatusMsg('');
 
     try {
-      const fd = new FormData();
-      fd.append('DishName', formData.DishName);
-      fd.append('Price', formData.Price);
-      fd.append('Category', formData.Category);
-      fd.append('prep_time_minutes', formData.prep_time_minutes);
-      fd.append('Ingredients', formData.Ingredients);
-      if (imageFile) fd.append('image', imageFile);
-      else if (formData.ImageUrl) fd.append('ImageUrl', formData.ImageUrl);
+      const formPayload = new FormData();
+      formPayload.append('DishName', formData.DishName);
+      formPayload.append('Price', formData.Price);
+      formPayload.append('Category', formData.Category);
+      formPayload.append('prep_time_minutes', formData.prep_time_minutes);
+      formPayload.append('Ingredients', formData.Ingredients);
+      if (imageFile) formPayload.append('image', imageFile);
+      else if (formData.ImageUrl) formPayload.append('ImageUrl', formData.ImageUrl);
 
-      const res = await fetch(`${API_BASE_URL}/api/menu`, {
+      const response = await fetch(`${API_BASE_URL}/api/menu`, {
         method: 'POST',
-        body: fd
+        credentials: 'include',
+        headers: ADMIN_REQUEST_HEADERS,
+        body: formPayload
       });
-      if (res.ok) {
-        const created = await res.json();
-        createdDish = created.data;
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.data) {
+        setStatusMsg(data.message || 'The menu item could not be published.');
+        return;
       }
-    } catch (_) {}
 
-    const newDishObj = createdDish || {
-      _id: `dish-${Date.now()}`,
-      DishName: formData.DishName,
-      Price: Number(formData.Price),
-      Category: formData.Category,
-      prep_time_minutes: Number(formData.prep_time_minutes),
-      Ingredients: formData.Ingredients.split(',').map((i) => i.trim()).filter(Boolean),
-      ImageUrl:
-        imagePreview ||
-        formData.ImageUrl ||
-        'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=900&q=80'
-    };
-
-    setMenus((prev) => mergeMenusWithBeverages([newDishObj, ...prev]));
-    setFormData({
-      DishName: '',
-      Price: '',
-      Category: 'Tibs & Sizzlers',
-      prep_time_minutes: 15,
-      Ingredients: '',
-      ImageUrl: ''
-    });
-    setImageFile(null);
-    setImagePreview('');
-    setStatusMsg('New dish successfully published to the menu!');
-    setTimeout(() => setStatusMsg(''), 4000);
+      setMenus((previous) => mergeMenusWithBeverages([data.data, ...previous]));
+      setFormData({
+        DishName: '',
+        Price: '',
+        Category: 'Tibs & Sizzlers',
+        prep_time_minutes: 15,
+        Ingredients: '',
+        ImageUrl: ''
+      });
+      setImageFile(null);
+      setImagePreview('');
+      setStatusMsg('New dish successfully published to the menu!');
+      setTimeout(() => setStatusMsg(''), 4000);
+    } catch (_) {
+      setStatusMsg('Unable to connect to the menu service.');
+    }
   };
 
   const openDishDetail = (dish) => {
@@ -1148,6 +1159,21 @@ export default function App() {
         {/* --- PRIVATE CUSTOMER RECEIPT VIEW --- */}
         {activeView === 'tracker' && (
           <div className="max-w-3xl mx-auto space-y-8">
+            {paymentMessage && (
+              <div className="rounded-xl border border-[#E8E3DA] bg-[#FFFEFC] p-4 text-sm text-[#2C241B]">
+                <p>{paymentMessage}</p>
+                {displayedReceipt?.PaymentStatus !== 'Paid' && displayedReceipt?.tx_ref && (
+                  <button
+                    type="button"
+                    onClick={() => verifyPayment(displayedReceipt.tx_ref)}
+                    disabled={isSubmitting}
+                    className="mt-3 rounded-lg bg-[#2C241B] px-4 py-2 text-xs font-bold text-white disabled:opacity-50"
+                  >
+                    {isSubmitting ? 'Checking...' : 'Check payment status again'}
+                  </button>
+                )}
+              </div>
+            )}
             {!displayedReceipt ? (
               <div className="bg-[#FFFEFC] rounded-[2rem] p-12 text-center border border-[#E8E3DA]">
                 <p className="text-[#6B635A]">You have no active receipts on this device yet.</p>
@@ -1402,6 +1428,14 @@ export default function App() {
                   <span>{isSyncing ? 'Syncing...' : 'Sync Orders'}</span>
                 </button>
                 <button
+                  type="button"
+                  onClick={handleStaffLogout}
+                  className="text-xs font-bold text-red-700 hover:text-red-900 flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-red-200 bg-white"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Logout</span>
+                </button>
+                <button
                   onClick={() => setStaffTab('queue')}
                   className={`text-sm font-bold pb-2 border-b-2 transition-colors ${
                     staffTab === 'queue'
@@ -1541,11 +1575,15 @@ export default function App() {
                           }
                           className="w-full py-3 px-3.5 bg-[#F9F6F0] border border-[#E8E3DA] text-[#2C241B] text-sm font-bold rounded-xl outline-none focus:border-[#D84C27] cursor-pointer transition-colors"
                         >
-                          {ORDER_STATUS_OPTIONS.map((statusOption) => (
-                            <option key={statusOption} value={statusOption}>
-                              {statusOption}
-                            </option>
-                          ))}
+                          {[order.OrderStatus, ...( {
+                    'Pending Kitchen': ['Preparing', 'Cancelled'],
+                    Preparing: ['Ready', 'Cancelled'],
+                    Ready: ['Completed', 'Cancelled']
+                  }[order.OrderStatus] || [] )].map((statusOption) => (
+                    <option key={statusOption} value={statusOption}>
+                      {statusOption}
+                    </option>
+                  ))}
                         </select>
                       </div>
                     </div>
@@ -1691,6 +1729,7 @@ export default function App() {
                 onClick={() => {
                   setIsAuthModalOpen(false);
                   setAuthError('');
+                  setPasscode('');
                 }}
                 className="text-[#6B635A] hover:text-[#2C241B]"
               >
@@ -1702,18 +1741,20 @@ export default function App() {
               Staff Authorization
             </h3>
             <p className="text-sm text-[#6B635A] mb-6">
-              Enter your 4-digit PIN to access the kitchen order queue and menu manager.
+              Enter your administrator password to access the kitchen order queue and menu manager.
             </p>
 
             <form onSubmit={handleStaffLogin} className="space-y-4">
               <div>
                 <input
                   type="password"
-                  maxLength={4}
-                  placeholder="••••"
+                  required
+                  maxLength={256}
+                  autoComplete="current-password"
+                  placeholder="Administrator password"
                   value={passcode}
                   onChange={(e) => setPasscode(e.target.value)}
-                  className={`w-full p-4 bg-[#F9F6F0] border rounded-xl text-center text-2xl tracking-[1em] font-mono outline-none transition-colors ${
+                  className={`w-full p-4 bg-[#F9F6F0] border rounded-xl text-center text-base font-mono outline-none transition-colors ${
                     authError
                       ? 'border-red-500 focus:border-red-500'
                       : 'border-[#E8E3DA] focus:border-[#2C241B]'
@@ -1726,9 +1767,10 @@ export default function App() {
               </div>
               <button
                 type="submit"
-                className="w-full py-4 bg-[#2C241B] hover:bg-[#D84C27] text-white font-bold rounded-xl transition-transform active:scale-[0.98]"
+                disabled={isAuthBusy || !passcode}
+                className="w-full py-4 bg-[#2C241B] hover:bg-[#D84C27] disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-transform active:scale-[0.98]"
               >
-                Authenticate
+                {isAuthBusy ? 'Authenticating…' : 'Authenticate'}
               </button>
             </form>
           </div>
@@ -1978,7 +2020,7 @@ export default function App() {
                 disabled={isSubmitting || cart.length === 0}
                 className="w-full py-4 bg-[#10A352] hover:bg-[#0D8A45] text-white font-bold rounded-xl text-sm tracking-wide transition-transform active:scale-[0.98] cursor-pointer"
               >
-                Pay with Chapa (
+                Continue to Chapa (
                 {serviceType === 'Dine-In' ? `Table #${tableNumber}` : serviceType})
               </button>
             </div>
@@ -1986,37 +2028,6 @@ export default function App() {
         </div>
       )}
 
-      {/* CHAPA MODAL SIMULATION */}
-      {pendingChapaOrder && (
-        <div className="fixed inset-0 z-[60] bg-[#2C241B]/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#FFFEFC] w-full max-w-sm rounded-[2rem] p-8 shadow-2xl text-center">
-            <div className="w-16 h-16 bg-[#10A352] text-white rounded-full flex items-center justify-center mx-auto mb-6">
-              <CheckCircle2 className="w-8 h-8" />
-            </div>
-            <h3 className="font-serif text-2xl font-bold mb-1">Chapa Checkout</h3>
-            <p className="text-xs font-bold uppercase tracking-wider text-[#6B635A] mb-4">
-              {pendingChapaOrder.ServiceType === 'Dine-In'
-                ? `Dine-In • Table #${pendingChapaOrder.TableNumber}`
-                : pendingChapaOrder.ServiceType}
-            </p>
-            <p className="font-mono text-3xl font-bold text-[#10A352] mb-8">
-              ETB {pendingChapaOrder.TotalAmount}
-            </p>
-            <button
-              onClick={() => verifyPayment(pendingChapaOrder.tx_ref)}
-              className="w-full py-4 bg-[#10A352] text-white font-bold rounded-full hover:bg-[#0D8A45] transition-transform active:scale-[0.98]"
-            >
-              Complete Chapa Payment
-            </button>
-            <button
-              onClick={() => setPendingChapaOrder(null)}
-              className="mt-4 text-sm font-medium text-[#6B635A] hover:text-[#2C241B]"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
