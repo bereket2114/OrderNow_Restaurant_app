@@ -4,12 +4,19 @@ const orderItemSchema = new mongoose.Schema({
     menuId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'restaurantMenus',
-        required: true
+        required: false,
+        default: null
+    },
+    catalogId: {
+        type: String,
+        trim: true,
+        default: null
     },
     DishName: {
         type: String,
         required: true,
-        trim: true
+        trim: true,
+        maxlength: 120
     },
     UnitPrice: {
         type: Number,
@@ -20,7 +27,9 @@ const orderItemSchema = new mongoose.Schema({
         type: Number,
         required: true,
         default: 1,
-        min: [1, 'Quantity must be at least 1']
+        min: [1, 'Quantity must be at least 1'],
+        max: 50,
+        validate: Number.isInteger
     },
     Subtotal: {
         type: Number,
@@ -37,28 +46,45 @@ const orderSchema = new mongoose.Schema({
     CustomerName: {
         type: String,
         required: [true, 'Customer name is required'],
-        trim: true
+        trim: true,
+        minlength: 2,
+        maxlength: 100
     },
     CustomerPhone: {
         type: String,
-        required: [true, 'Customer phone number is required'],
-        trim: true
+        trim: true,
+        default: '',
+        maxlength: 30
     },
     CustomerEmail: {
         type: String,
         trim: true,
-        default: 'customer@ordernow.com'
+        lowercase: true,
+        default: '',
+        maxlength: 254
+    },
+    ServiceType: {
+        type: String,
+        enum: ['Dine-In', 'Takeaway', 'Delivery'],
+        default: 'Dine-In'
+    },
+    TableNumber: {
+        type: String,
+        trim: true,
+        maxlength: 10,
+        default: ''
     },
     DeliveryAddress: {
         type: String,
         trim: true,
-        default: 'Takeaway / Pickup'
+        default: 'Takeaway / Pickup',
+        maxlength: 300
     },
     items: {
         type: [orderItemSchema],
         validate: {
-            validator: (arr) => Array.isArray(arr) && arr.length > 0,
-            message: 'Order must contain at least one food item.'
+            validator: (arr) => Array.isArray(arr) && arr.length > 0 && arr.length <= 30,
+            message: 'Order must contain between 1 and 30 food items.'
         }
     },
     TotalAmount: {
@@ -68,7 +94,8 @@ const orderSchema = new mongoose.Schema({
     },
     Message: {
         type: String,
-        trim: true
+        trim: true,
+        maxlength: 500
     },
     PaymentMethod: {
         type: String,
@@ -83,9 +110,13 @@ const orderSchema = new mongoose.Schema({
     tx_ref: {
         type: String,
         unique: true,
-        required: true
+        required: true,
+        index: true
     },
     chapaCheckoutUrl: {
+        type: String
+    },
+    chapaReference: {
         type: String
     },
     OrderStatus: {

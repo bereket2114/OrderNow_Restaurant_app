@@ -1,12 +1,15 @@
+const express = require('express')
 const menuController = require('../controller/menuController')
 const upload = require('../middleware/uploadMiddleware')
-const express = require('express')
+const { requireAdmin } = require('../middleware/adminAuth')
+const { validateImageSignature } = require('../middleware/uploadMiddleware')
+
 const router = express.Router()
 
-router.post('/', upload.single('image'), menuController.createMenu)
 router.get('/', menuController.getMenu)
 router.get('/:id', menuController.getMore)
-router.put('/:id', upload.single('image'), menuController.updateMenu)
-router.delete('/:id', menuController.deleteMenu)
+router.post('/', requireAdmin, upload.single('image'), validateImageSignature, menuController.createMenu)
+router.put('/:id', requireAdmin, upload.single('image'), validateImageSignature, menuController.updateMenu)
+router.delete('/:id', requireAdmin, menuController.deleteMenu)
 
 module.exports = router
