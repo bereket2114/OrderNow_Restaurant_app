@@ -3,9 +3,9 @@ const mongoose = require('mongoose')
 const Order = require('../model/orderSchema')
 const Menu = require('../model/menuSchema')
 const trustedMenuCatalog = require('../config/trustedMenuCatalog')
-const { CURRENCY, roundMoney, isChapaPaymentVerified, isChapaPaymentFailed } = require('../utils/chapaPayment')
+const { CURRENCY, roundMoney, normalizeChapaBaseUrl, isChapaPaymentVerified, isChapaPaymentFailed } = require('../utils/chapaPayment')
 
-const CHAPA_BASE_URL = (process.env.CHAPA_URL || 'https://api.chapa.co/v1').replace(/\/+$/, '')
+const CHAPA_BASE_URL = normalizeChapaBaseUrl(process.env.CHAPA_URL)
 const FRONTEND_URL = (process.env.FRONTEND_URL || '').replace(/\/+$/, '')
 
 function getPublicPaymentResult(order) {

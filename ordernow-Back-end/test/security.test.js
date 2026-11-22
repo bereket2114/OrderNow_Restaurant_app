@@ -5,7 +5,7 @@ const { hashPassword, verifyPassword } = require('../utils/passwordHash')
 const { getAllowedOrigins, requireTrustedBrowserRequest } = require('../middleware/securityConfig')
 const createRateLimiter = require('../middleware/rateLimiter')
 const trustedMenuCatalog = require('../config/trustedMenuCatalog')
-const { isChapaPaymentVerified, isChapaPaymentFailed } = require('../utils/chapaPayment')
+const { normalizeChapaBaseUrl, isChapaPaymentVerified, isChapaPaymentFailed } = require('../utils/chapaPayment')
 
 test('password hashes are salted and can only be verified with the right password', () => {
     const password = 'correct-horse-battery-staple'
@@ -125,4 +125,14 @@ test('Chapa verification requires matching transaction reference, amount, curren
     assert.equal(isChapaPaymentVerified(true, { ...validResponse, data: { ...validResponse.data, tx_ref: 'different' } }, order), false)
     assert.equal(isChapaPaymentFailed(true, { status: 'success', data: { status: 'failed', tx_ref: order.tx_ref } }, order.tx_ref), true)
     assert.equal(isChapaPaymentFailed(true, { status: 'success', data: { status: 'failed', tx_ref: 'different' } }, order.tx_ref), false)
+})
+
+
+test('Chapa base URL normalization prevents duplicated initialize paths', () => {
+    assert.equal(normalizeChapaBaseUrl(undefined), 'https://api.chapa.co/v1')
+    assert.equal(normalizeChapaBaseUrl('https://api.chapa.co/v1'), 'https://api.chapa.co/v1')
+    assert.equal(normalizeChapaBaseUrl('https://api.chapa.co/v1/transaction/initialize'), 'https://api.chapa.co/v1')
+    assert.equal(normalizeChapaBaseUrl('https://api.chapa.co/v1/transaction/initialize/transaction/initialize/'), 'https://api.chapa.co/v1')
+    assert.throws(() => normalizeChapaBaseUrl('http://api.chapa.co/v1'), /https/i)
+    assert.throws(() => normalizeChapaBaseUrl('https://example.com/v1'), /api.chapa.co/)
 })

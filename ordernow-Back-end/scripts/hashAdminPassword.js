@@ -5,7 +5,7 @@ if (!process.stdin.isTTY) {
     process.exit(1)
 }
 
-process.stdout.write('Enter a new administrator password (minimum 12 characters): ')
+process.stdout.write('Enter a new administrator password (minimum 12 characters; input is masked): ')
 process.stdin.setRawMode(true)
 process.stdin.setEncoding('utf8')
 process.stdin.resume()
@@ -36,9 +36,13 @@ process.stdin.on('data', (chunk) => {
             process.exit(0)
         }
         if (character === '\u007f' || character === '\b') {
-            password = password.slice(0, -1)
-        } else {
+            if (password.length > 0) {
+                password = password.slice(0, -1)
+                process.stdout.write('\b \b')
+            }
+        } else if (character >= ' ') {
             password += character
+            process.stdout.write('*')
         }
     }
 })
