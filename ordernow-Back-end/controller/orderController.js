@@ -220,8 +220,8 @@ module.exports = {
                     return_url: returnUrl,
                     ...(callbackUrl ? { callback_url: callbackUrl } : {}),
                     customization: {
-                        title: 'OrderNow Food Checkout',
-                        description: `Order of ${validatedItems.length} item(s)`
+                        title: 'OrderNow Order',
+                        description: `Order of ${validatedItems.length} ${validatedItems.length === 1 ? 'item' : 'items'}`
                     }
                 }),
                 signal: AbortSignal.timeout(15_000)
