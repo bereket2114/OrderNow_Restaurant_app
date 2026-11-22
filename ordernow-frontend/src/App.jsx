@@ -24,7 +24,14 @@ import {
   LogOut
 } from 'lucide-react';
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/+$/, '');
+const CONFIGURED_API_URL = String(import.meta.env.VITE_API_URL || '').trim();
+const API_BASE_URL = (CONFIGURED_API_URL || (import.meta.env.DEV ? 'http://localhost:5000' : '')).replace(/\/+$/, '');
+const apiUrl = (path) => {
+  if (!API_BASE_URL) {
+    throw new Error('The backend API URL is not configured. Set VITE_API_URL in your Vercel project settings and redeploy.');
+  }
+  return `${API_BASE_URL}${path}`;
+};
 const ADMIN_REQUEST_HEADERS = { 'X-OrderNow-Request': '1' };
 
 const CATEGORIES = [
@@ -113,49 +120,6 @@ const PERMANENT_BEVERAGES = [
     Ingredients: ['100% Yirgacheffe Arabica Espresso', 'Velvet Steamed Whole Milk'],
     IsAvailable: true,
     isPermanentBeverage: true
-  }
-];
-
-const INITIAL_FOOD_MENUS = [
-  {
-    _id: '673a1001a1b2c3d4e5f60001',
-    DishName: 'Awaze Rosemary Derek Tibs',
-    Price: 480,
-    Category: 'Tibs & Sizzlers',
-    ImageUrl: 'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=900&q=85',
-    prep_time_minutes: 20,
-    Ingredients: ['Cubed Tender Beef', 'Awaze Spice Blend', 'Fresh Rosemary', 'Onions', 'Jalapeno', 'Niter Kibbeh'],
-    IsAvailable: true
-  },
-  {
-    _id: '673a1001a1b2c3d4e5f60002',
-    DishName: 'Royal Addis Beyaynetu Platter',
-    Price: 650,
-    Category: 'Traditional Platter (Beyaynetu)',
-    ImageUrl: 'https://images.unsplash.com/photo-1540420773420-3366772f4999?auto=format&fit=crop&w=900&q=85',
-    prep_time_minutes: 25,
-    Ingredients: ['100% Teff Injera', 'Misir Wot', 'Kik Alicha', 'Shiro Tegamino', 'Gomen', 'Atakilt Wot'],
-    IsAvailable: true
-  },
-  {
-    _id: '673a1001a1b2c3d4e5f60003',
-    DishName: 'Shiro Tegamino with Spiced Butter',
-    Price: 280,
-    Category: 'Fastin (Vegetable / Lenten)',
-    ImageUrl: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=900&q=85',
-    prep_time_minutes: 15,
-    Ingredients: ['Ground Chickpea Flour', 'Berbere', 'Garlic', 'Traditional Clay Pot Sizzler', 'Injera'],
-    IsAvailable: true
-  },
-  {
-    _id: '673a1001a1b2c3d4e5f60004',
-    DishName: 'Special Kurt Raw Meat Platter',
-    Price: 850,
-    Category: 'Raw Meats (Kurt / Special)',
-    ImageUrl: 'https://images.unsplash.com/photo-1607623814075-e51df1bdc82f?auto=format&fit=crop&w=900&q=85',
-    prep_time_minutes: 10,
-    Ingredients: ['Fresh Prime Beef Cut', 'Mitmita', 'Awaze', 'Kocho', 'Fresh Mustard (Senafich)'],
-    IsAvailable: true
   }
 ];
 
@@ -297,15 +261,10 @@ export default function App() {
   const [activeView, setActiveView] = useState('storefront');
   const [selectedDish, setSelectedDish] = useState(null);
 
-  const [menus, setMenus] = useState(() => {
-    try {
-      const saved = localStorage.getItem('orderNow_menus');
-      const parsed = saved ? JSON.parse(saved) : INITIAL_FOOD_MENUS;
-      return mergeMenusWithBeverages(parsed);
-    } catch (_) {
-      return mergeMenusWithBeverages(INITIAL_FOOD_MENUS);
-    }
-  });
+  // Food dishes are always loaded from the backend database. Only drinks are intentionally static.
+  const [menus, setMenus] = useState(() => mergeMenusWithBeverages([]));
+  const [isMenuLoading, setIsMenuLoading] = useState(true);
+  const [menuLoadError, setMenuLoadError] = useState('');
 
   // Receipt references are only accepted when they were previously saved by this browser's checkout flow.
   const [myReceiptRefs, setMyReceiptRefs] = useState(() => {
@@ -330,7 +289,7 @@ export default function App() {
         receiptRefs.includes(savedActive.tx_ref) || receiptRefs.includes(String(savedActive._id))
       );
       const combined = activeIsOwnReceipt ? [savedActive, ...ownOrders] : ownOrders;
-      return mergeOrdersList(combined, [], mergeMenusWithBeverages(INITIAL_FOOD_MENUS));
+      return mergeOrdersList(combined, [], mergeMenusWithBeverages([]));
     } catch (_) {
       return [];
     }
@@ -415,10 +374,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Older versions cached demo or stale food menus here. Never use that cache as menu data.
     try {
-      localStorage.setItem('orderNow_menus', JSON.stringify(menus));
+      localStorage.removeItem('orderNow_menus');
     } catch (_) {}
-  }, [menus]);
+  }, []);
 
   const saveOwnCustomerOrder = (order) => {
     try {
@@ -443,57 +403,77 @@ export default function App() {
   const fetchBackendData = async (showSpinner = false) => {
     if (showSpinner) setIsSyncing(true);
     try {
-      const menuRequest = fetch(`${API_BASE_URL}/api/menu`);
-      const orderRequest = isStaff
-        ? fetch(`${API_BASE_URL}/api/orders`, {
-            credentials: 'include',
-            headers: ADMIN_REQUEST_HEADERS
-          })
-        : Promise.resolve(null);
+      if (!API_BASE_URL) {
+        throw new Error('The backend API URL is not configured. Set VITE_API_URL in Vercel → Project Settings → Environment Variables, then redeploy.');
+      }
 
-      const [menuRes, orderRes] = await Promise.all([menuRequest, orderRequest]);
-      let latestMenus = menus;
+      const menuRes = await fetch(apiUrl('/api/menu'), { cache: 'no-store' });
+      const menuResponse = await menuRes.json().catch(() => ({}));
 
-      if (menuRes.ok) {
-        const menuResponse = await menuRes.json();
-        if (Array.isArray(menuResponse.data) && menuResponse.data.length > 0) {
-          const formattedDbMenus = menuResponse.data.map((dish, idx) => ({
-            ...dish,
-            Category: dish.Category || 'Tibs & Sizzlers',
-            ImageUrl:
-              dish.ImageUrl ||
-              INITIAL_FOOD_MENUS[idx % INITIAL_FOOD_MENUS.length].ImageUrl,
-            Ingredients: Array.isArray(dish.Ingredients)
-              ? dish.Ingredients
-              : ['Freshly Prepared']
-          }));
-          latestMenus = mergeMenusWithBeverages(formattedDbMenus);
-          setMenus(latestMenus);
-        }
+      if (!menuRes.ok || menuResponse?.success !== true || !Array.isArray(menuResponse.data)) {
+        setMenus(mergeMenusWithBeverages([]));
+        setMenuLoadError(menuResponse?.message || `The restaurant menu service returned HTTP ${menuRes.status}. Food dishes are hidden until the database connection is restored.`);
+      } else {
+        // A food dish is rendered only when its actual database record contains its own details.
+        // Do not invent a name, category, price, image, prep time, or ingredients for incomplete records.
+        const validDatabaseMenus = menuResponse.data.filter((dish) => (
+          dish &&
+          dish._id &&
+          typeof dish.DishName === 'string' && dish.DishName.trim() &&
+          Number.isFinite(Number(dish.Price)) && Number(dish.Price) > 0 &&
+          typeof dish.Category === 'string' && dish.Category.trim() &&
+          typeof dish.ImageUrl === 'string' && /^https:\/\//i.test(dish.ImageUrl.trim()) &&
+          Number.isFinite(Number(dish.prep_time_minutes)) && Number(dish.prep_time_minutes) > 0 &&
+          Array.isArray(dish.Ingredients) && dish.Ingredients.length > 0 &&
+          dish.IsAvailable !== false
+        ));
+
+        const hiddenInvalidCount = menuResponse.data.length - validDatabaseMenus.length;
+        const formattedDatabaseMenus = validDatabaseMenus.map((dish) => ({
+          ...dish,
+          Price: Number(dish.Price),
+          prep_time_minutes: Number(dish.prep_time_minutes),
+          Ingredients: dish.Ingredients
+        }));
+
+        setMenus(mergeMenusWithBeverages(formattedDatabaseMenus));
+        setMenuLoadError(
+          hiddenInvalidCount > 0
+            ? `${hiddenInvalidCount} food menu record(s) were hidden because a required database field is missing or invalid. Check the dish name, price, category, HTTPS image URL, preparation time, ingredients, and availability in the staff dashboard.`
+            : ''
+        );
       }
 
       let dbOrders = [];
-      if (isStaff && orderRes) {
-        if (orderRes.status === 401 || orderRes.status === 403) {
-          setIsStaff(false);
-          setActiveView('storefront');
-          const ownOrders = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
-          setOrders(Array.isArray(ownOrders) ? ownOrders : []);
-        } else if (orderRes.ok) {
-          const orderResponse = await orderRes.json();
-          if (Array.isArray(orderResponse.data)) dbOrders = orderResponse.data;
+      if (isStaff) {
+        try {
+          const orderRes = await fetch(apiUrl('/api/orders'), {
+            credentials: 'include',
+            headers: ADMIN_REQUEST_HEADERS,
+            cache: 'no-store'
+          });
+          if (orderRes.status === 401 || orderRes.status === 403) {
+            setIsStaff(false);
+            setActiveView('storefront');
+            const ownOrders = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
+            setOrders(Array.isArray(ownOrders) ? ownOrders : []);
+          } else if (orderRes.ok) {
+            const orderResponse = await orderRes.json().catch(() => ({}));
+            if (Array.isArray(orderResponse.data)) dbOrders = orderResponse.data;
+          }
+        } catch (orderError) {
+          console.warn('Could not retrieve staff orders from the OrderNow API:', orderError.message);
         }
       }
 
-      // Local storage is reserved for receipts created on this browser. Staff order data stays in memory.
+      // Local storage is reserved for receipts created by this browser, never the public food menu.
       const savedRefs = JSON.parse(localStorage.getItem('orderNow_myReceiptRefs') || '[]');
       const stored = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
       const localStoredOrders = Array.isArray(stored)
         ? stored.filter((order) => savedRefs.includes(order?.tx_ref) || savedRefs.includes(String(order?._id)))
         : [];
-      // Remove any all-orders cache written by older versions from this browser.
       localStorage.setItem('orderNow_orders', JSON.stringify(localStoredOrders));
-      const merged = mergeOrdersList(localStoredOrders, dbOrders, latestMenus);
+      const merged = mergeOrdersList(localStoredOrders, dbOrders, menus);
       setOrders(merged);
 
       const nowStr = new Date().toLocaleTimeString([], {
@@ -502,16 +482,22 @@ export default function App() {
         second: '2-digit'
       });
       setLastSyncedAt(nowStr);
-    } catch (_) {
-      console.warn('Could not synchronize with the OrderNow API.');
+    } catch (error) {
+      console.warn('Could not synchronize the OrderNow menu from the backend:', error.message);
+      setMenus(mergeMenusWithBeverages([]));
+      setMenuLoadError(error.message || 'Could not load food dishes from the restaurant database. Please try again later.');
     } finally {
+      setIsMenuLoading(false);
       if (showSpinner) setIsSyncing(false);
     }
   };
 
   useEffect(() => {
     let active = true;
-    fetch(`${API_BASE_URL}/api/admin/session`, {
+    if (!API_BASE_URL) {
+      return () => { active = false; };
+    }
+    fetch(apiUrl('/api/admin/session'), {
       credentials: 'include',
       headers: ADMIN_REQUEST_HEADERS
     })
@@ -541,7 +527,7 @@ export default function App() {
     setIsAuthBusy(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/admin/login`, {
+      const response = await fetch(apiUrl('/api/admin/login'), {
         method: 'POST',
         credentials: 'include',
         headers: {
@@ -570,7 +556,7 @@ export default function App() {
 
   const handleStaffLogout = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/admin/logout`, {
+      const response = await fetch(apiUrl('/api/admin/logout'), {
         method: 'POST',
         credentials: 'include',
         headers: ADMIN_REQUEST_HEADERS
@@ -667,7 +653,7 @@ export default function App() {
     };
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/orders`, {
+      const response = await fetch(apiUrl('/api/orders'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -724,7 +710,7 @@ export default function App() {
         (Array.isArray(storedOrders) ? storedOrders.find((order) => order.tx_ref === tx_ref) : null) ||
         (storedActive?.tx_ref === tx_ref ? storedActive : null);
 
-      const response = await fetch(`${API_BASE_URL}/api/orders/verify/${encodeURIComponent(tx_ref)}`);
+      const response = await fetch(apiUrl(`/api/orders/verify/${encodeURIComponent(tx_ref)}`));
       const data = await response.json().catch(() => ({}));
 
       if (response.ok && data.verified === true && data.data?.PaymentStatus === 'Paid') {
@@ -769,7 +755,7 @@ export default function App() {
 
   const handleUpdateOrderStatus = async (orderId, txRef, newStatus) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/orders/${orderId}/status`, {
+      const response = await fetch(apiUrl(`/api/orders/${orderId}/status`), {
         method: 'PUT',
         credentials: 'include',
         headers: {
@@ -809,7 +795,7 @@ export default function App() {
       if (imageFile) formPayload.append('image', imageFile);
       else if (formData.ImageUrl) formPayload.append('ImageUrl', formData.ImageUrl);
 
-      const response = await fetch(`${API_BASE_URL}/api/menu`, {
+      const response = await fetch(apiUrl('/api/menu'), {
         method: 'POST',
         credentials: 'include',
         headers: ADMIN_REQUEST_HEADERS,
@@ -999,7 +985,23 @@ export default function App() {
               </div>
             </div>
 
-            {/* Menu Grid */}
+            {isMenuLoading && (
+              <p className="text-center text-sm text-[#6B635A] py-4" role="status">
+                Loading food dishes from the restaurant database…
+              </p>
+            )}
+            {!isMenuLoading && menuLoadError && (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 text-amber-900 px-4 py-3 text-sm" role="alert">
+                {menuLoadError}
+              </div>
+            )}
+            {!isMenuLoading && !menuLoadError && menus.filter((dish) => !dish.isPermanentBeverage).length === 0 && selectedCategory !== 'Beverages & Drinks' && (
+              <p className="text-center text-sm text-[#6B635A] py-4">
+                No food dishes have been published to the restaurant database yet. Permanent beverages are still available below.
+              </p>
+            )}
+
+            {/* Menu Grid: food items here come only from the database; permanent drinks remain local. */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 lg:gap-12">
               {filteredMenus.map((dish) => (
                 <MenuCard
@@ -1111,7 +1113,7 @@ export default function App() {
               </div>
               <div className="md:w-1/2 p-8 md:p-12 flex flex-col justify-center">
                 <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-[#F9F6F0] text-[#6B635A] w-fit mb-4">
-                  {selectedDish.Category || 'Traditional Specialty'}
+                  {selectedDish.Category}
                 </div>
 
                 <h1 className="font-serif text-3xl md:text-4xl font-bold text-[#2C241B] leading-tight mb-4">
@@ -1123,7 +1125,7 @@ export default function App() {
                     ETB {selectedDish.Price}
                   </span>
                   <span className="flex items-center gap-1.5 text-sm text-[#6B635A] font-medium">
-                    <Clock className="w-4 h-4" /> {selectedDish.prep_time_minutes || 15} min prep
+                    <Clock className="w-4 h-4" /> {selectedDish.prep_time_minutes} min prep
                   </span>
                 </div>
 
