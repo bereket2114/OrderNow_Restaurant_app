@@ -43,6 +43,35 @@ app.use(cors({
 app.use(express.json({ limit: '100kb' }))
 app.use(express.urlencoded({ extended: false, limit: '100kb' }))
 
+let dbConnectPromise = null
+
+async function ensureDatabaseConnection() {
+    if (mongoose.connection.readyState === 1) {
+        return
+    }
+    if (!dbConnectPromise) {
+        dbConnectPromise = Promise.resolve()
+            .then(() => connectDB())
+            .catch((error) => {
+                dbConnectPromise = null
+                throw error
+            })
+    }
+    await dbConnectPromise
+}
+
+app.use(async (req, res, next) => {
+    try {
+        await ensureDatabaseConnection()
+        return next()
+    } catch (error) {
+        console.error('Database connection failed:', error && error.message ? error.message : 'Unknown error')
+        return res.status(503).json({
+            success: false,
+            message: 'Database connection unavailable.'
+        })
+    }
+})
 app.get('/api/health', (req, res) => {
     const databaseConnected = mongoose.connection.readyState === 1
     return res.status(databaseConnected ? 200 : 503).json({
