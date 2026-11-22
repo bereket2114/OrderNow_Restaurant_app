@@ -22,7 +22,7 @@ function parseCookies(header = '') {
 }
 
 function cookieOptions() {
-    const secure = process.env.NODE_ENV === 'production'
+    const secure = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL)
     let sameSite = (process.env.COOKIE_SAME_SITE || (secure ? 'none' : 'lax')).toLowerCase()
     if (!['strict', 'lax', 'none'].includes(sameSite)) sameSite = 'lax'
     if (sameSite === 'none' && !secure) sameSite = 'lax'
@@ -42,6 +42,7 @@ function serializeCookie(name, value, options = {}) {
     if (options.secure) parts.push('Secure')
     if (options.sameSite) parts.push(`SameSite=${options.sameSite[0].toUpperCase()}${options.sameSite.slice(1)}`)
     return parts.join('; ')
+    if (options.secure && options.sameSite === 'none') parts.push('Partitioned')
 }
 
 function setSessionCookie(res, token) {
