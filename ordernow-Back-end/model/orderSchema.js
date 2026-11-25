@@ -124,6 +124,10 @@ const orderSchema = new mongoose.Schema({
         enum: ['Awaiting Payment', 'Pending Kitchen', 'Preparing', 'Ready', 'Completed', 'Cancelled'],
         default: 'Awaiting Payment'
     },
+    statusUpdatedAt: {
+        type: Date,
+        default: Date.now
+    },
     orderedAt: {
         type: Date,
         default: Date.now

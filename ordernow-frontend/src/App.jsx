@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   ShoppingBag,
   Search,
@@ -12,6 +12,8 @@ import {
   UtensilsCrossed,
   Lock,
   KeyRound,
+  Eye,
+  EyeOff,
   ArrowLeft,
   Info,
   RefreshCw,
@@ -152,6 +154,13 @@ function extractServiceDetails(rawOrder) {
   return { serviceType, tableNumber, deliveryAddress };
 }
 
+function toStatusTimestamp(value) {
+  if (value === null || value === undefined || value === '') return 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  const parsed = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function normalizeOrder(rawOrder, menusList = []) {
   if (!rawOrder) return null;
 
@@ -201,7 +210,7 @@ function normalizeOrder(rawOrder, menusList = []) {
     TotalAmount: computedTotal,
     PaymentStatus: rawOrder.PaymentStatus || 'Pending',
     OrderStatus: rawOrder.OrderStatus || 'Awaiting Payment',
-    statusUpdatedAt: Number(rawOrder.statusUpdatedAt || 0),
+    statusUpdatedAt: toStatusTimestamp(rawOrder.statusUpdatedAt),
     orderedAt: rawOrder.orderedAt || new Date().toISOString()
   };
 }
@@ -327,11 +336,95 @@ export default function App() {
   const [isStaff, setIsStaff] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [passcode, setPasscode] = useState('');
+  const [showPasscode, setShowPasscode] = useState(false);
   const [authError, setAuthError] = useState('');
   const [paymentMessage, setPaymentMessage] = useState('');
   const [isAuthBusy, setIsAuthBusy] = useState(false);
 
   const [staffTab, setStaffTab] = useState('queue');
+  const [staffOrderFilter, setStaffOrderFilter] = useState('All');
+  const [updatingOrderId, setUpdatingOrderId] = useState('');
+
+  // Keep the browser history in sync with the app's internal screens and cart drawer.
+  // This lets Android/iOS Back close the cart first, then return through app screens.
+  const navigateTo = (nextView, options = {}) => {
+    const nextState = {
+      orderNowApp: true,
+      orderNowView: nextView,
+      orderNowCartOpen: false
+    };
+    if (options.replace) {
+      window.history.replaceState(nextState, '', window.location.href);
+    } else if (
+      window.history.state?.orderNowView !== nextView ||
+      window.history.state?.orderNowCartOpen
+    ) {
+      window.history.pushState(nextState, '', window.location.href);
+    }
+    setActiveView(nextView);
+    setIsCartOpen(false);
+  };
+
+  const openCart = () => {
+    window.history.pushState({
+      orderNowApp: true,
+      orderNowView: activeView,
+      orderNowCartOpen: true
+    }, '', window.location.href);
+    setIsCartOpen(true);
+  };
+
+  const closeCart = () => {
+    if (window.history.state?.orderNowApp && window.history.state?.orderNowCartOpen) {
+      window.history.back();
+    } else {
+      setIsCartOpen(false);
+    }
+  };
+
+  const closeCartForRedirect = () => {
+    if (window.history.state?.orderNowApp && window.history.state?.orderNowCartOpen) {
+      window.history.replaceState({
+        ...window.history.state,
+        orderNowCartOpen: false
+      }, '', window.location.href);
+    }
+    setIsCartOpen(false);
+  };
+
+  const goBackToApp = (fallbackView = 'storefront') => {
+    if (window.history.state?.orderNowApp && (
+      window.history.state.orderNowView !== 'storefront' ||
+      window.history.state.orderNowCartOpen
+    )) {
+      window.history.back();
+    } else {
+      navigateTo(fallbackView, { replace: true });
+    }
+  };
+
+  useEffect(() => {
+    if (!window.history.state?.orderNowApp) {
+      window.history.replaceState({
+        orderNowApp: true,
+        orderNowView: 'storefront',
+        orderNowCartOpen: false
+      }, '', window.location.href);
+    }
+
+    const handleAppPopState = (event) => {
+      const state = event.state;
+      if (state?.orderNowApp) {
+        setActiveView(state.orderNowView || 'storefront');
+        setIsCartOpen(Boolean(state.orderNowCartOpen));
+      } else {
+        setActiveView('storefront');
+        setIsCartOpen(false);
+      }
+    };
+    window.addEventListener('popstate', handleAppPopState);
+    return () => window.removeEventListener('popstate', handleAppPopState);
+  }, []);
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState('');
   const [formData, setFormData] = useState({
@@ -454,7 +547,7 @@ export default function App() {
           });
           if (orderRes.status === 401 || orderRes.status === 403) {
             setIsStaff(false);
-            setActiveView('storefront');
+            navigateTo('storefront', { replace: true });
             const ownOrders = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
             setOrders(Array.isArray(ownOrders) ? ownOrders : []);
           } else if (orderRes.ok) {
@@ -546,7 +639,8 @@ export default function App() {
       setIsStaff(true);
       setIsAuthModalOpen(false);
       setPasscode('');
-      setActiveView('staff');
+      setShowPasscode(false);
+      navigateTo('staff');
     } catch (_) {
       setAuthError('Unable to connect to the staff authentication service.');
     } finally {
@@ -572,7 +666,7 @@ export default function App() {
     }
 
     setIsStaff(false);
-    setActiveView('storefront');
+    navigateTo('storefront', { replace: true });
     setStaffTab('queue');
     try {
       const savedRefs = JSON.parse(localStorage.getItem('orderNow_myReceiptRefs') || '[]');
@@ -679,7 +773,7 @@ export default function App() {
       );
 
       saveOwnCustomerOrder(serverOrder);
-      setIsCartOpen(false);
+      closeCartForRedirect();
       setCheckoutError('');
 
       // Navigate to Chapa's hosted payment page. Do not simulate a successful payment locally.
@@ -694,13 +788,13 @@ export default function App() {
   const verifyPayment = async (tx_ref) => {
     if (!/^ORDN-[A-F0-9]{32}$/.test(String(tx_ref || ''))) {
       setPaymentMessage('The payment reference is invalid. No payment has been confirmed.');
-      setActiveView('tracker');
+      navigateTo('tracker');
       return;
     }
 
     setIsSubmitting(true);
     setPaymentMessage('Checking your payment securely with Chapa...');
-    setActiveView('tracker');
+    navigateTo('tracker');
 
     let localOrder = null;
     try {
@@ -743,7 +837,11 @@ export default function App() {
       setIsSubmitting(false);
       // Remove the transaction reference from the visible address bar after verification.
       if (window.location.search.includes('tx_ref=')) {
-        window.history.replaceState({}, document.title, window.location.pathname);
+        window.history.replaceState(
+          { ...(window.history.state || {}), orderNowApp: true, orderNowView: 'tracker', orderNowCartOpen: false },
+          document.title,
+          window.location.pathname
+        );
       }
     }
   };
@@ -754,6 +852,8 @@ export default function App() {
   }, []);
 
   const handleUpdateOrderStatus = async (orderId, txRef, newStatus) => {
+    setStatusMsg('');
+    setUpdatingOrderId(String(orderId));
     try {
       const response = await fetch(apiUrl(`/api/orders/${orderId}/status`), {
         method: 'PUT',
@@ -772,12 +872,18 @@ export default function App() {
 
       setOrders((previous) => previous.map((order) =>
         String(order._id) === String(orderId) || (txRef && order.tx_ref === txRef)
-          ? { ...order, OrderStatus: data.data?.OrderStatus || newStatus }
+          ? {
+              ...order,
+              OrderStatus: data.data?.OrderStatus || newStatus,
+              statusUpdatedAt: toStatusTimestamp(data.data?.statusUpdatedAt) || Date.now()
+            }
           : order
       ));
       setStatusMsg('Order status updated successfully.');
     } catch (_) {
       setStatusMsg('Unable to connect to the order service.');
+    } finally {
+      setUpdatingOrderId('');
     }
   };
 
@@ -827,7 +933,7 @@ export default function App() {
 
   const openDishDetail = (dish) => {
     setSelectedDish(dish);
-    setActiveView('detail');
+    navigateTo('detail');
   };
 
   const filteredMenus = menus.filter((dish) => {
@@ -855,14 +961,89 @@ export default function App() {
     null;
 
   const hasCustomerReceipt = myCustomerOrders.length > 0;
+  const staffStatusFilters = ['All', 'Pending Kitchen', 'Preparing', 'Ready', 'Completed', 'Cancelled'];
+  const visibleStaffOrders = orders.filter((order) => (
+    staffOrderFilter === 'All' || order.OrderStatus === staffOrderFilter
+  ));
+
+  // Fetch only the public payment/kitchen fields for this customer's high-entropy receipt reference.
+  const refreshCustomerOrderStatus = useCallback(async (txRef) => {
+    if (!txRef) return false;
+    try {
+      const response = await fetch(apiUrl(`/api/orders/status/${encodeURIComponent(txRef)}`), {
+        cache: 'no-store'
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || result?.success !== true || !result.data) return false;
+
+      const serverStatus = result.data;
+      const safeStatus = {
+        PaymentStatus: serverStatus.PaymentStatus,
+        OrderStatus: serverStatus.OrderStatus,
+        statusUpdatedAt: toStatusTimestamp(serverStatus.statusUpdatedAt)
+      };
+      setOrders((previous) => previous.map((order) => (
+        order.tx_ref === txRef ? { ...order, ...safeStatus } : order
+      )));
+
+      try {
+        const storedOrders = JSON.parse(localStorage.getItem('orderNow_orders') || '[]');
+        const updatedStoredOrders = Array.isArray(storedOrders)
+          ? storedOrders.map((order) => order?.tx_ref === txRef
+            ? { ...order, ...safeStatus }
+            : order)
+          : [];
+        localStorage.setItem('orderNow_orders', JSON.stringify(updatedStoredOrders));
+        const activeOrder = JSON.parse(localStorage.getItem('orderNow_activeOrder') || 'null');
+        if (activeOrder?.tx_ref === txRef) {
+          localStorage.setItem('orderNow_activeOrder', JSON.stringify({ ...activeOrder, ...safeStatus }));
+        }
+      } catch (_) {
+        // The live server response still updates React state if browser storage is unavailable.
+      }
+      return true;
+    } catch (_) {
+      // Keep the last confirmed receipt visible; the next polling cycle will retry.
+      return false;
+    }
+  }, []);
+
+  // Poll while a customer receipt is open. Stop when the kitchen workflow reaches a terminal state.
+  useEffect(() => {
+    const txRef = displayedReceipt?.tx_ref;
+    if (activeView !== 'tracker' || !txRef) return undefined;
+    if (['Completed', 'Cancelled'].includes(displayedReceipt?.OrderStatus)) return undefined;
+
+    let cancelled = false;
+    const poll = async () => {
+      if (!cancelled) await refreshCustomerOrderStatus(txRef);
+    };
+
+    poll();
+    const intervalId = window.setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeView, displayedReceipt?.tx_ref, displayedReceipt?.OrderStatus, refreshCustomerOrderStatus]);
+
+  const handleRefreshCustomerStatus = async () => {
+    if (!displayedReceipt?.tx_ref) return;
+    setIsSyncing(true);
+    try {
+      await refreshCustomerOrderStatus(displayedReceipt.tx_ref);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#F9F6F0] text-[#2C241B] font-sans selection:bg-[#D84C27] selection:text-white">
       {/* --- HEADER NAVIGATION --- */}
       <header className="sticky top-0 z-40 bg-[#F9F6F0]/95 backdrop-blur-md border-b border-[#E8E3DA]">
-        <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 min-h-16 sm:min-h-20 py-3 flex flex-wrap items-center justify-between gap-3">
           <div
-            onClick={() => setActiveView('storefront')}
+            onClick={() => navigateTo('storefront')}
             className="flex items-center gap-3 cursor-pointer group"
           >
             <UtensilsCrossed className="w-6 h-6 text-[#D84C27] group-hover:rotate-12 transition-transform duration-300" />
@@ -871,10 +1052,10 @@ export default function App() {
             </span>
           </div>
 
-          <div className="flex items-center gap-6">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 sm:gap-4 md:gap-6">
             <button
               onClick={() => {
-                setActiveView('storefront');
+                navigateTo('storefront');
                 setSelectedDish(null);
               }}
               className={`text-sm font-medium transition-colors ${
@@ -888,7 +1069,7 @@ export default function App() {
 
             {hasCustomerReceipt && (
               <button
-                onClick={() => setActiveView('tracker')}
+                onClick={() => navigateTo('tracker')}
                 className={`text-sm font-medium flex items-center gap-1.5 transition-colors ${
                   activeView === 'tracker'
                     ? 'text-[#D84C27]'
@@ -904,7 +1085,12 @@ export default function App() {
 
             {!isStaff ? (
               <button
-                onClick={() => setIsAuthModalOpen(true)}
+                onClick={() => {
+                  setPasscode('');
+                  setShowPasscode(false);
+                  setAuthError('');
+                  setIsAuthModalOpen(true);
+                }}
                 className="text-sm font-medium text-[#6B635A] hover:text-[#2C241B] flex items-center gap-1.5 transition-colors"
               >
                 <Lock className="w-4 h-4" />
@@ -912,7 +1098,7 @@ export default function App() {
               </button>
             ) : (
               <button
-                onClick={() => setActiveView('staff')}
+                onClick={() => navigateTo('staff')}
                 className={`text-sm font-semibold flex items-center gap-1.5 transition-colors ${
                   activeView === 'staff'
                     ? 'text-[#10A352]'
@@ -927,8 +1113,8 @@ export default function App() {
             )}
 
             <button
-              onClick={() => setIsCartOpen(true)}
-              className="relative flex items-center gap-2 px-5 py-2.5 rounded-full bg-[#2C241B] text-[#F9F6F0] hover:bg-[#D84C27] transition-all active:scale-[0.98] shadow-[0_4px_14px_0_rgba(44,36,27,0.1)]"
+              onClick={openCart}
+              className="relative flex items-center gap-2 px-3 sm:px-5 py-2.5 rounded-full bg-[#2C241B] text-[#F9F6F0] hover:bg-[#D84C27] transition-all active:scale-[0.98] shadow-[0_4px_14px_0_rgba(44,36,27,0.1)]"
             >
               <ShoppingBag className="w-4 h-4" />
               <span className="text-sm font-medium font-mono tabular-nums">
@@ -939,7 +1125,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-12">
+      <main className="max-w-7xl mx-auto px-3 sm:px-6 py-6 sm:py-12">
         {/* --- STOREFRONT VIEW --- */}
         {activeView === 'storefront' && (
           <div className="space-y-12">
@@ -1096,7 +1282,7 @@ export default function App() {
         {activeView === 'detail' && selectedDish && (
           <div className="max-w-5xl mx-auto pt-4">
             <button
-              onClick={() => setActiveView('storefront')}
+              onClick={() => goBackToApp('storefront')}
               className="inline-flex items-center gap-2 text-[#6B635A] hover:text-[#2C241B] font-medium text-sm mb-8 transition-colors"
             >
               <ArrowLeft className="w-4 h-4" />
@@ -1160,7 +1346,7 @@ export default function App() {
 
         {/* --- PRIVATE CUSTOMER RECEIPT VIEW --- */}
         {activeView === 'tracker' && (
-          <div className="max-w-3xl mx-auto space-y-8">
+          <div className="max-w-3xl mx-auto space-y-5 sm:space-y-8 px-0 sm:px-2">
             {paymentMessage && (
               <div className="rounded-xl border border-[#E8E3DA] bg-[#FFFEFC] p-4 text-sm text-[#2C241B]">
                 <p>{paymentMessage}</p>
@@ -1181,7 +1367,7 @@ export default function App() {
                 <p className="text-[#6B635A]">You have no active receipts on this device yet.</p>
               </div>
             ) : (
-              <div className="bg-[#FFFEFC] rounded-[2rem] p-8 md:p-12 shadow-[0_20px_40px_-15px_rgba(44,36,27,0.05)] border border-[#E8E3DA]">
+              <div className="bg-[#FFFEFC] rounded-2xl sm:rounded-[2rem] p-4 sm:p-8 md:p-12 shadow-[0_20px_40px_-15px_rgba(44,36,27,0.05)] border border-[#E8E3DA]">
                 <div className="flex flex-wrap justify-between items-center gap-3 mb-6">
                   <span className="inline-flex items-center gap-1.5 text-xs font-bold text-[#10A352] bg-[#10A352]/10 px-3 py-1 rounded-full">
                     <Lock className="w-3.5 h-3.5" /> Private Customer Receipt
@@ -1209,7 +1395,8 @@ export default function App() {
                   </span>
 
                   <button
-                    onClick={() => fetchBackendData(true)}
+                    onClick={handleRefreshCustomerStatus}
+                    disabled={isSyncing}
                     className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#6B635A] hover:text-[#2C241B] px-3 py-1.5 rounded-lg border border-[#E8E3DA]"
                   >
                     <RefreshCw
@@ -1226,7 +1413,7 @@ export default function App() {
                   <h2 className="font-serif text-3xl font-bold text-[#2C241B]">
                     Order Confirmed
                   </h2>
-                  <p className="font-mono text-sm text-[#6B635A] mt-2">
+                  <p className="font-mono text-xs sm:text-sm text-[#6B635A] mt-2 break-words">
                     Receipt #{displayedReceipt.tx_ref} • {displayedReceipt.CustomerName}
                   </p>
                   <div className="inline-flex items-center gap-2 mt-4 px-5 py-2 bg-[#FAF7F2] rounded-full border border-[#D84C27]/40">
@@ -1240,7 +1427,7 @@ export default function App() {
 
                 {/* 4-Step Kitchen Progress Bar */}
                 <div className="mb-10">
-                  <div className="flex justify-between mb-2">
+                  <div className="flex flex-wrap justify-between gap-x-2 gap-y-2 mb-2">
                     {[
                       { label: 'Pending Kitchen', short: 'Pending Kitchen' },
                       { label: 'Preparing', short: 'Preparing' },
@@ -1248,15 +1435,12 @@ export default function App() {
                       { label: 'Completed', short: 'Completed' }
                     ].map((step, i) => {
                       const stages = ['Pending Kitchen', 'Preparing', 'Ready', 'Completed'];
-                      const currentIdx = Math.max(
-                        0,
-                        stages.indexOf(displayedReceipt.OrderStatus || 'Pending Kitchen')
-                      );
-                      const isActive = i <= currentIdx;
+                      const currentIdx = stages.indexOf(displayedReceipt.OrderStatus || 'Pending Kitchen');
+                      const isActive = displayedReceipt.OrderStatus !== 'Cancelled' && i <= currentIdx;
                       return (
                         <div
                           key={step.label}
-                          className={`text-xs font-bold ${
+                          className={`text-[10px] sm:text-xs font-bold ${
                             isActive ? 'text-[#D84C27]' : 'text-[#6B635A]/40'
                           }`}
                         >
@@ -1269,16 +1453,12 @@ export default function App() {
                     <div
                       className="h-full bg-[#D84C27] transition-all duration-500 ease-out"
                       style={{
-                        width: `${
-                          (Math.max(
-                            0,
-                            ['Pending Kitchen', 'Preparing', 'Ready', 'Completed'].indexOf(
-                              displayedReceipt.OrderStatus || 'Pending Kitchen'
-                            )
-                          ) +
-                            1) *
-                          25
-                        }%`
+                        width: `${displayedReceipt.OrderStatus === 'Cancelled' ? 0 : (Math.max(
+                          0,
+                          ['Pending Kitchen', 'Preparing', 'Ready', 'Completed'].indexOf(
+                            displayedReceipt.OrderStatus || 'Pending Kitchen'
+                          )
+                        ) + 1) * 25}%`
                       }}
                     />
                   </div>
@@ -1287,7 +1467,7 @@ export default function App() {
                 {/* Service Details Box */}
                 <div className="mb-8 p-4 rounded-2xl bg-[#F9F6F0] border border-[#E8E3DA] space-y-2 text-sm">
                   {displayedReceipt.ServiceType === 'Dine-In' && (
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="font-bold text-[#2C241B]">Dine-In Table Assignment:</span>
                       <span className="font-mono font-bold text-base text-[#D84C27]">
                         Table #{displayedReceipt.TableNumber || '1'}
@@ -1296,7 +1476,7 @@ export default function App() {
                   )}
 
                   {displayedReceipt.ServiceType === 'Takeaway' && (
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="font-bold text-[#2C241B]">Takeaway Pickup For:</span>
                       <span className="font-mono font-semibold text-[#2C241B]">
                         {displayedReceipt.CustomerName} ({displayedReceipt.CustomerPhone})
@@ -1308,7 +1488,7 @@ export default function App() {
                     <div className="space-y-2">
                       <div className="flex items-start justify-between gap-4">
                         <span className="font-bold text-[#2C241B]">Delivery Destination:</span>
-                        <span className="text-right font-medium text-[#2C241B]">
+                        <span className="min-w-0 break-words text-right font-medium text-[#2C241B]">
                           {displayedReceipt.DeliveryAddress} ({displayedReceipt.CustomerPhone})
                         </span>
                       </div>
@@ -1327,8 +1507,8 @@ export default function App() {
                 {/* Ordered Items List */}
                 <div className="space-y-4 border-t border-[#E8E3DA] pt-8 mb-8">
                   {(displayedReceipt.items || []).map((item, i) => (
-                    <div key={i} className="flex justify-between items-center">
-                      <div className="flex items-center gap-3">
+                    <div key={i} className="flex flex-wrap justify-between items-start gap-2">
+                      <div className="flex min-w-0 items-center gap-3">
                         <span className="font-mono text-sm font-bold text-[#D84C27]">
                           {item.Quantity}x
                         </span>
@@ -1350,7 +1530,7 @@ export default function App() {
                   </div>
                 )}
 
-                <div className="flex justify-between items-center border-t border-[#E8E3DA] pt-6">
+                <div className="flex flex-wrap justify-between items-center gap-2 border-t border-[#E8E3DA] pt-6">
                   <span className="font-serif text-lg font-bold text-[#2C241B]">Total Paid</span>
                   <span className="font-mono text-xl font-bold text-[#10A352] tabular-nums">
                     ETB {Number(displayedReceipt.TotalAmount || 0).toLocaleString()}
@@ -1376,8 +1556,8 @@ export default function App() {
                           : 'border-[#E8E3DA] hover:bg-[#F9F6F0]'
                       }`}
                     >
-                      <div>
-                        <span className="font-mono text-xs font-bold text-[#2C241B]">
+                      <div className="min-w-0 flex-1 break-words">
+                        <span className="font-mono text-[10px] sm:text-xs font-bold text-[#2C241B] break-all">
                           #{ord.tx_ref}
                         </span>
                         <span className="text-xs font-bold text-[#D84C27] ml-2">
@@ -1405,14 +1585,14 @@ export default function App() {
         {/* --- STAFF DASHBOARD VIEW --- */}
         {activeView === 'staff' && isStaff && (
           <div>
-            <div className="flex flex-wrap items-end justify-between border-b border-[#2C241B] pb-6 mb-10 gap-4">
+            <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-end justify-between border-b border-[#2C241B] pb-5 sm:pb-6 mb-6 sm:mb-10 gap-4">
               <div>
                 <h1 className="font-serif text-3xl font-bold text-[#2C241B]">Kitchen Portal</h1>
                 <p className="text-[#6B635A] mt-2">
                   Manage Dine-In table orders, Takeaway pickups, Delivery dispatches, and menu inventory.
                 </p>
               </div>
-              <div className="flex items-center gap-4 sm:gap-6">
+              <div className="flex w-full sm:w-auto flex-wrap items-center justify-start sm:justify-end gap-2 sm:gap-4">
                 {lastSyncedAt && (
                   <span className="hidden md:inline text-xs font-mono text-[#10A352]">
                     Synced {lastSyncedAt}
@@ -1461,7 +1641,35 @@ export default function App() {
             </div>
 
             {staffTab === 'queue' && (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              <>
+                {statusMsg && (
+                  <div className="mb-4 rounded-xl border border-[#D84C27]/30 bg-[#D84C27]/10 px-4 py-3 text-sm font-semibold text-[#8C321C]" role="status">
+                    {statusMsg}
+                  </div>
+                )}
+                <div className="mb-5 flex gap-2 overflow-x-auto pb-2" aria-label="Filter orders by kitchen status">
+                  {staffStatusFilters.map((filter) => {
+                    const count = filter === 'All'
+                      ? orders.length
+                      : orders.filter((order) => order.OrderStatus === filter).length;
+                    return (
+                      <button
+                        key={filter}
+                        type="button"
+                        onClick={() => setStaffOrderFilter(filter)}
+                        className={`shrink-0 rounded-full border px-3 py-2 text-xs font-bold transition-colors ${
+                          staffOrderFilter === filter
+                            ? 'border-[#2C241B] bg-[#2C241B] text-white'
+                            : 'border-[#E8E3DA] bg-[#FFFEFC] text-[#6B635A] hover:border-[#D84C27]'
+                        }`}
+                      >
+                        {filter} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 items-start gap-4 sm:gap-6">
+
                 {orders.length === 0 ? (
                   <div className="col-span-full bg-[#FFFEFC] border border-[#E8E3DA] rounded-2xl p-12 text-center">
                     <ChefHat className="w-10 h-10 text-[#6B635A] mx-auto mb-3" />
@@ -1472,11 +1680,15 @@ export default function App() {
                       Place a Dine-In, Takeaway, or Delivery order from the Menu tab to see it appear here.
                     </p>
                   </div>
+                ) : visibleStaffOrders.length === 0 ? (
+                  <div className="col-span-full rounded-2xl border border-[#E8E3DA] bg-[#FFFEFC] p-8 text-center text-sm text-[#6B635A]">
+                    No orders currently have the "{staffOrderFilter}" status.
+                  </div>
                 ) : (
-                  orders.map((order) => (
+                  visibleStaffOrders.map((order) => (
                     <div
                       key={order._id || order.tx_ref}
-                      className="bg-[#FFFEFC] border border-[#E8E3DA] p-6 shadow-sm rounded-2xl flex flex-col justify-between"
+                      className="min-w-0 w-full h-fit self-start bg-[#FFFEFC] border border-[#E8E3DA] p-4 sm:p-6 shadow-sm rounded-2xl flex flex-col"
                     >
                       <div>
                         {/* SERVICE MODE BADGE ON STAFF TICKET */}
@@ -1507,9 +1719,9 @@ export default function App() {
 
                         {/* Customer Contact Details */}
                         <div className="mb-4 pb-4 border-b border-[#E8E3DA] space-y-1">
-                          <div className="font-serif font-bold text-lg text-[#2C241B] flex items-center justify-between">
+                          <div className="font-serif font-bold text-lg text-[#2C241B] flex flex-col sm:flex-row sm:items-start sm:justify-between gap-1 min-w-0">
                             <span>{order.CustomerName}</span>
-                            <span className="font-mono text-xs text-[#6B635A]">#{order.tx_ref}</span>
+                            <span className="font-mono text-[10px] sm:text-xs text-[#6B635A] break-all sm:text-right">#{order.tx_ref}</span>
                           </div>
 
                           {order.CustomerPhone && (
@@ -1534,7 +1746,7 @@ export default function App() {
                           {(order.items || []).map((item, i) => (
                             <div
                               key={i}
-                              className="flex justify-between items-center text-sm bg-[#F9F6F0] px-3.5 py-2.5 rounded-xl border border-[#E8E3DA]"
+                              className="flex flex-wrap justify-between items-start gap-2 text-sm bg-[#F9F6F0] px-3.5 py-2.5 rounded-xl border border-[#E8E3DA]"
                             >
                               <span className="font-medium text-[#2C241B]">
                                 <span className="font-mono font-bold mr-2 text-[#D84C27]">
@@ -1572,26 +1784,38 @@ export default function App() {
                         </div>
                         <select
                           value={order.OrderStatus || 'Pending Kitchen'}
+                          disabled={updatingOrderId === String(order._id)}
                           onChange={(e) =>
                             handleUpdateOrderStatus(order._id, order.tx_ref, e.target.value)
                           }
-                          className="w-full py-3 px-3.5 bg-[#F9F6F0] border border-[#E8E3DA] text-[#2C241B] text-sm font-bold rounded-xl outline-none focus:border-[#D84C27] cursor-pointer transition-colors"
+                          className="w-full min-w-0 py-3 px-3.5 bg-[#F9F6F0] border border-[#E8E3DA] text-[#2C241B] text-sm font-bold rounded-xl outline-none focus:border-[#D84C27] cursor-pointer transition-colors"
                         >
-                          {[order.OrderStatus, ...( {
-                    'Pending Kitchen': ['Preparing', 'Cancelled'],
-                    Preparing: ['Ready', 'Cancelled'],
-                    Ready: ['Completed', 'Cancelled']
-                  }[order.OrderStatus] || [] )].map((statusOption) => (
-                    <option key={statusOption} value={statusOption}>
-                      {statusOption}
-                    </option>
-                  ))}
+                          {['Pending Kitchen', 'Preparing', 'Ready', 'Completed', 'Cancelled'].map((statusOption) => {
+                            const allowedNext = {
+                              'Pending Kitchen': ['Preparing', 'Cancelled'],
+                              Preparing: ['Ready', 'Cancelled'],
+                              Ready: ['Completed', 'Cancelled'],
+                              Completed: [],
+                              Cancelled: []
+                            }[order.OrderStatus] || [];
+                            const isCurrent = statusOption === order.OrderStatus;
+                            return (
+                              <option
+                                key={statusOption}
+                                value={statusOption}
+                                disabled={!isCurrent && !allowedNext.includes(statusOption)}
+                              >
+                                {statusOption}{!isCurrent && !allowedNext.includes(statusOption) ? ' (not available yet)' : ''}
+                              </option>
+                            );
+                          })}
                         </select>
                       </div>
                     </div>
                   ))
                 )}
-              </div>
+                </div>
+              </>
             )}
 
             {staffTab === 'menu' && (
@@ -1732,6 +1956,7 @@ export default function App() {
                   setIsAuthModalOpen(false);
                   setAuthError('');
                   setPasscode('');
+                  setShowPasscode(false);
                 }}
                 className="text-[#6B635A] hover:text-[#2C241B]"
               >
@@ -1748,21 +1973,33 @@ export default function App() {
 
             <form onSubmit={handleStaffLogin} className="space-y-4">
               <div>
-                <input
-                  type="password"
-                  required
-                  maxLength={256}
-                  autoComplete="current-password"
-                  placeholder="Administrator password"
-                  value={passcode}
-                  onChange={(e) => setPasscode(e.target.value)}
-                  className={`w-full p-4 bg-[#F9F6F0] border rounded-xl text-center text-base font-mono outline-none transition-colors ${
-                    authError
-                      ? 'border-red-500 focus:border-red-500'
-                      : 'border-[#E8E3DA] focus:border-[#2C241B]'
-                  }`}
-                  autoFocus
-                />
+                <div className="relative">
+                  <input
+                    type={showPasscode ? 'text' : 'password'}
+                    required
+                    maxLength={256}
+                    autoComplete="current-password"
+                    placeholder="Administrator password"
+                    value={passcode}
+                    onChange={(e) => setPasscode(e.target.value)}
+                    className={`w-full p-4 pr-12 bg-[#F9F6F0] border rounded-xl text-center text-base font-mono outline-none transition-colors ${
+                      authError
+                        ? 'border-red-500 focus:border-red-500'
+                        : 'border-[#E8E3DA] focus:border-[#2C241B]'
+                    }`}
+                    autoFocus
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPasscode((visible) => !visible)}
+                    aria-label={showPasscode ? 'Hide administrator password' : 'Show administrator password'}
+                    aria-pressed={showPasscode}
+                    title={showPasscode ? 'Hide password' : 'Show password'}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg p-2 text-[#6B635A] hover:bg-[#E8E3DA] hover:text-[#2C241B] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#D84C27]"
+                  >
+                    {showPasscode ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                  </button>
+                </div>
                 {authError && (
                   <p className="text-red-500 text-xs font-bold mt-2 text-center">{authError}</p>
                 )}
@@ -1784,20 +2021,20 @@ export default function App() {
         <div className="fixed inset-0 z-50 flex justify-end">
           <div
             className="absolute inset-0 bg-[#2C241B]/20 backdrop-blur-sm"
-            onClick={() => setIsCartOpen(false)}
+            onClick={closeCart}
           />
-          <div className="relative w-full max-w-md bg-[#FFFEFC] h-full shadow-2xl flex flex-col">
-            <div className="p-6 border-b border-[#E8E3DA] flex justify-between items-center">
+          <div className="relative w-full max-w-md bg-[#FFFEFC] h-full min-h-0 shadow-2xl flex flex-col">
+            <div className="p-4 sm:p-6 border-b border-[#E8E3DA] flex justify-between items-center gap-3">
               <h2 className="font-serif text-2xl font-bold text-[#2C241B]">Your Order Tray</h2>
               <button
-                onClick={() => setIsCartOpen(false)}
+                onClick={closeCart}
                 className="text-[#6B635A] hover:text-[#2C241B]"
               >
                 <X className="w-6 h-6" />
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 space-y-6">
               {cart.length === 0 ? (
                 <p className="text-center text-[#6B635A] mt-10">Your tray is empty.</p>
               ) : (

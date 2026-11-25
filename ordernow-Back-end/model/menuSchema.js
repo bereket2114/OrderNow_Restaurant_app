@@ -51,6 +51,15 @@ const menuSchema = new mongoose.Schema({
         type: Boolean,
         default: true
     },
+    IsDeleted: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
+    deletedAt: {
+        type: Date,
+        default: null
+    },
     postedAt: {
         type: Date,
         default: Date.now

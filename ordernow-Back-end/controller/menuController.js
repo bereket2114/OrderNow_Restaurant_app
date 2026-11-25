@@ -61,8 +61,8 @@ function validateMenuFields({ DishName, Price, Category, prep_time_minutes, Ingr
 module.exports = {
     getMenu: async (req, res) => {
         try {
-            const menus = await menuSchema.find()
-                .select('DishName Price Category ImageUrl prep_time_minutes Ingredients IsAvailable postedAt')
+            const menus = await menuSchema.find({ IsAvailable: true, IsDeleted: { $ne: true } })
+                .select('DishName Price Category ImageUrl prep_time_minutes Ingredients IsAvailable IsDeleted postedAt')
                 .sort({ DishName: 1 })
                 .lean()
             return res.status(200).json({ success: true, data: menus, message: 'Menu received successfully.' })
@@ -77,7 +77,7 @@ module.exports = {
             if (!mongoose.isValidObjectId(req.params.id)) {
                 return res.status(400).json({ success: false, message: 'Invalid menu item ID.' })
             }
-            const menu = await menuSchema.findById(req.params.id).lean()
+            const menu = await menuSchema.findOne({ _id: req.params.id, IsAvailable: true, IsDeleted: { $ne: true } }).lean()
             if (!menu) return res.status(404).json({ success: false, message: 'Menu item not found.' })
             return res.status(200).json({ success: true, data: menu })
         } catch (error) {
@@ -117,7 +117,9 @@ module.exports = {
                 ImagePublicId,
                 prep_time_minutes: validation.numericPrepTime,
                 Ingredients: validation.parsedIngredients,
-                IsAvailable: true
+                IsAvailable: true,
+                IsDeleted: false,
+                deletedAt: null
             })
 
             return res.status(201).json({ success: true, message: 'Menu created successfully.', data: menu })
@@ -132,7 +134,7 @@ module.exports = {
             const { id } = req.params
             if (!mongoose.isValidObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid menu item ID.' })
 
-            const existingMenu = await menuSchema.findById(id)
+            const existingMenu = await menuSchema.findOne({ _id: id, IsDeleted: { $ne: true } })
             if (!existingMenu) return res.status(404).json({ success: false, message: 'Menu item not found.' })
 
             const body = req.body || {}
@@ -200,18 +202,22 @@ module.exports = {
     deleteMenu: async (req, res) => {
         try {
             const { id } = req.params
-            if (!mongoose.isValidObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid menu item ID.' })
-
-            const deletedMenu = await menuSchema.findByIdAndDelete(id)
-            if (!deletedMenu) return res.status(404).json({ success: false, message: 'Menu item not found.' })
-
-            if (deletedMenu.ImagePublicId) {
-                await cloudinary.uploader.destroy(deletedMenu.ImagePublicId).catch((error) => {
-                    console.warn('Could not delete Cloudinary image:', error.message)
-                })
+            if (!mongoose.isValidObjectId(id)) {
+                return res.status(400).json({ success: false, message: 'Invalid menu item ID.' })
             }
 
-            return res.status(200).json({ success: true, message: 'Menu deleted successfully.' })
+            // Soft-delete: the item disappears from public menu APIs immediately but can be recovered.
+            const deletedMenu = await menuSchema.findOneAndUpdate(
+                { _id: id, IsDeleted: { $ne: true } },
+                { $set: { IsAvailable: false, IsDeleted: true, deletedAt: new Date() } },
+                { new: true }
+            )
+
+            if (!deletedMenu) {
+                return res.status(404).json({ success: false, message: 'Active menu item not found.' })
+            }
+
+            return res.status(200).json({ success: true, message: 'Menu item removed from the public menu.' })
         } catch (error) {
             console.error('Menu deletion failed:', error.message)
             return res.status(500).json({ success: false, message: 'Unable to delete the menu item.' })

@@ -15,7 +15,8 @@ function getPublicPaymentResult(order) {
         PaymentStatus: order.PaymentStatus,
         OrderStatus: order.OrderStatus,
         TotalAmount: order.TotalAmount,
-        currency: CURRENCY
+        currency: CURRENCY,
+        statusUpdatedAt: order.statusUpdatedAt || null
     }
 }
 
@@ -76,6 +77,39 @@ module.exports = {
         } catch (error) {
             console.error('Could not retrieve orders:', error.message)
             return res.status(500).json({ success: false, message: 'Unable to retrieve orders.' })
+        }
+    },
+
+    // Public customer receipt tracking. tx_ref is a high-entropy bearer reference;
+    // return only status fields and never expose customer details or order contents.
+    getOrderStatus: async (req, res) => {
+        try {
+            const { tx_ref } = req.params
+            if (typeof tx_ref !== 'string' || !/^ORDN-[A-F0-9]{32}$/.test(tx_ref)) {
+                return res.status(400).json({ success: false, message: 'Invalid order reference.' })
+            }
+
+            const order = await Order.findOne({ tx_ref })
+                .select('tx_ref PaymentStatus OrderStatus statusUpdatedAt')
+                .lean()
+
+            if (!order) {
+                return res.status(404).json({ success: false, message: 'Order receipt not found.' })
+            }
+
+            res.set('Cache-Control', 'no-store, private')
+            return res.status(200).json({
+                success: true,
+                data: {
+                    tx_ref: order.tx_ref,
+                    PaymentStatus: order.PaymentStatus,
+                    OrderStatus: order.OrderStatus,
+                    statusUpdatedAt: order.statusUpdatedAt || null
+                }
+            })
+        } catch (error) {
+            console.error('Could not retrieve customer order status:', error.message)
+            return res.status(500).json({ success: false, message: 'Unable to retrieve order status.' })
         }
     },
 
@@ -269,7 +303,8 @@ module.exports = {
                 PaymentStatus: 'Pending',
                 tx_ref,
                 chapaCheckoutUrl: safeCheckoutUrl,
-                OrderStatus: 'Awaiting Payment'
+                OrderStatus: 'Awaiting Payment',
+                statusUpdatedAt: new Date()
             })
 
             await order.save()
@@ -363,6 +398,7 @@ module.exports = {
                     $set: {
                         PaymentStatus: 'Paid',
                         OrderStatus: order.OrderStatus === 'Awaiting Payment' ? 'Pending Kitchen' : order.OrderStatus,
+                        statusUpdatedAt: new Date(),
                         chapaReference: String(payment.reference || '')
                     }
                 },
@@ -416,6 +452,7 @@ module.exports = {
             }
 
             order.OrderStatus = OrderStatus
+            order.statusUpdatedAt = new Date()
             await order.save()
 
             return res.status(200).json({

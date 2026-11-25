@@ -20,6 +20,11 @@ const chapaCallbackLimiter = createRateLimiter({
     max: 120,
     message: 'Too many payment callbacks. Please try again later.'
 })
+const customerStatusLimiter = createRateLimiter({
+    windowMs: 5 * 60 * 1000,
+    max: 60,
+    message: 'Too many receipt status checks. Please try again shortly.'
+})
 
 router.post('/', requireTrustedBrowserRequest, createOrderLimiter, orderController.createOrder)
 router.get('/chapa/callback', chapaCallbackLimiter, (req, res) => {
@@ -30,6 +35,7 @@ router.get('/chapa/callback', chapaCallbackLimiter, (req, res) => {
     req.params.tx_ref = txRef
     return orderController.verifyOrderPayment(req, res)
 })
+router.get('/status/:tx_ref', customerStatusLimiter, orderController.getOrderStatus)
 router.get('/verify/:tx_ref', verifyPaymentLimiter, orderController.verifyOrderPayment)
 router.get('/', requireAdmin, orderController.getOrder)
 router.put('/:id/status', requireAdmin, orderController.updateOrderStatus)
